@@ -91,6 +91,26 @@ registerHotlistTools(server);
 process.stderr.write('⚠  tradingview-mcp  |  Unofficial tool. Not affiliated with TradingView Inc. or Anthropic.\n');
 process.stderr.write('   Ensure your usage complies with TradingView\'s Terms of Use.\n\n');
 
+// Graceful shutdown: when the MCP host (Claude Code, Tauri sidecar, etc.)
+// kills us via SIGTERM, dev Ctrl-C sends SIGINT, or stdin EOF when the
+// parent process drops the pipe — close the CDP WebSocket cleanly so
+// TradingView doesn't see a dangling connection. Pairs with the
+// no-Runtime.enable change in connection.js to eliminate the EPIPE-on-
+// TV-close crash.
+import { disconnect as disconnectCdp } from './connection.js';
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  process.stderr.write(`tradingview-mcp shutting down (${signal})\n`);
+  try { await disconnectCdp(); } catch { /* ignore */ }
+  process.exit(0);
+}
+process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+process.on('SIGINT',  () => { void shutdown('SIGINT'); });
+process.stdin.on('end',   () => { void shutdown('stdin-end'); });
+process.stdin.on('close', () => { void shutdown('stdin-close'); });
+
 // Start stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

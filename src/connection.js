@@ -145,10 +145,28 @@ export async function connect() {
       targetInfo = target;
       client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: target.id });
 
-      // Enable required domains
-      await client.Runtime.enable();
-      await client.Page.enable();
-      await client.DOM.enable();
+      // Deliberately NOT calling Runtime.enable / Page.enable / DOM.enable.
+      //
+      // None of our tools subscribe to events from these domains — every
+      // call goes through Runtime.evaluate, Input.dispatchKeyEvent, or
+      // Page.captureScreenshot, all of which work without the domain
+      // being "enabled".
+      //
+      // Crucially, Runtime.enable instructs TradingView to forward every
+      // console.debug() through the CDP WebSocket as Runtime.consoleAPICalled
+      // events. When the user closes TradingView the renderer's logger
+      // fires final messages through that pipe while the socket is half-
+      // closed; Socket._write throws EPIPE, TV doesn't catch it, and the
+      // user sees a "Critical Error" dialog every time they close the app.
+      //
+      // If event subscriptions become necessary later (DOM mutations, frame
+      // navigation, console relay), enable per-tool around the operation
+      // and disable on cleanup. Do NOT enable globally here.
+
+      // Drop the cached client immediately when TV closes the connection.
+      // Without this hook, the next request waits for its own socket error
+      // before discovering the connection is dead.
+      client.on('disconnect', () => { client = null; targetInfo = null; });
 
       // Force the chart canvas to keep painting even when this CDP target's
       // tab is in the background. Background tabs report visibilityState
@@ -208,11 +226,29 @@ export async function evaluateAsync(expression) {
 }
 
 export async function disconnect() {
-  if (client) {
-    try { await client.close(); } catch {}
-    client = null;
-    targetInfo = null;
-  }
+  if (!client) return;
+  // Send disable defensively before closing the WebSocket. Even though we
+  // never enable these domains ourselves, a TV-side V8 inspector with
+  // implicit forwarding will stop sending late console events that would
+  // hit a half-closed socket and trigger EPIPE on TV's renderer at exit.
+  // disable on a not-enabled domain is a no-op.
+  try {
+    await Promise.allSettled([
+      client.Runtime?.disable?.(),
+      client.Page?.disable?.(),
+      client.DOM?.disable?.(),
+      client.Console?.disable?.(),
+      client.Log?.disable?.(),
+      client.Inspector?.disable?.(),
+    ]);
+  } catch { /* best effort */ }
+  try { await client.close(); } catch { /* ignore */ }
+  // chrome-remote-interface's close() resolves when the close frame was
+  // sent, not when the peer ack'd it. Give the socket time to flush so TV
+  // sees a clean teardown before our process exits.
+  await new Promise((r) => setTimeout(r, 250));
+  client = null;
+  targetInfo = null;
 }
 
 export async function connectToTarget(targetId) {
@@ -221,9 +257,8 @@ export async function connectToTarget(targetId) {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
       client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: targetId });
-      await client.Runtime.enable();
-      await client.Page.enable();
-      await client.DOM.enable();
+      // No domain enables — see connect() for the EPIPE-on-TV-close rationale.
+      client.on('disconnect', () => { client = null; targetInfo = null; });
       // Re-apply per-target focus emulation. See connect() for rationale.
       try { await client.Emulation.setFocusEmulationEnabled({ enabled: true }); } catch {}
       targetInfo = { id: targetId };
