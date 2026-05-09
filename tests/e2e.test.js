@@ -362,6 +362,31 @@ describe('TradingView MCP — Full E2E (93 tools)', () => {
       assert.ok(!ids.includes(r1.entity_id), `study ${r1.entity_id} removed`);
     });
 
+    it('chart_remove_studies_by_title — add 2 then bulk-remove by name', async () => {
+      const r1 = await coreChart.manageIndicator({ action: 'add', indicator: 'Volume' });
+      assert.equal(r1.success, true);
+      const r2 = await coreChart.manageIndicator({ action: 'add', indicator: 'Volume' });
+      assert.equal(r2.success, true);
+      await sleep(500);
+      const before = await coreChart.getState();
+      const volumeBefore = before.studies.filter(s => /volume/i.test(s.name));
+      assert.ok(volumeBefore.length >= 2, `expected at least 2 Volume studies, got ${volumeBefore.length}`);
+      const rm = await coreChart.removeStudiesByTitle({ title_match: 'Volume' });
+      assert.equal(rm.success, true);
+      assert.ok(rm.removed.length >= 2, `expected at least 2 removed, got ${rm.removed.length}`);
+      await sleep(500);
+      const after = await coreChart.getState();
+      const volumeAfter = after.studies.filter(s => /volume/i.test(s.name));
+      assert.equal(volumeAfter.length, 0, `all Volume studies removed (had ${volumeAfter.length})`);
+    });
+
+    it('chart_remove_studies_by_title — no match returns empty success', async () => {
+      const r = await coreChart.removeStudiesByTitle({ title_match: '__definitely_not_a_real_study__' });
+      assert.equal(r.success, true);
+      assert.deepEqual(r.matched, []);
+      assert.deepEqual(r.removed, []);
+    });
+
     it('chart_get_visible_range — get date range', async () => {
       const r = await coreChart.getVisibleRange();
       assert.equal(r.success, true);

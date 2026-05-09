@@ -39,6 +39,13 @@ export function registerChartTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  server.tool('chart_remove_studies_by_title', 'Remove all studies/indicators whose name contains the given substring (case-insensitive). Returns matched + removed lists. Useful for cleaning up duplicates or removing by Pine script name without first calling chart_get_state.', {
+    title_match: z.string().describe('Case-insensitive substring of study name (e.g., "SMC Engine", "Volume Profile")'),
+  }, async ({ title_match }) => {
+    try { return jsonResult(await core.removeStudiesByTitle({ title_match })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   server.tool('chart_get_visible_range', 'Get the visible date range (unix timestamps) and bars range on the chart', {}, async () => {
     try { return jsonResult(await core.getVisibleRange()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

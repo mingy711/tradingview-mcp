@@ -174,6 +174,40 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
   }
 }
 
+export async function removeStudiesByTitle({ title_match, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  if (!title_match || typeof title_match !== 'string') {
+    throw new Error('title_match required (case-insensitive substring of study name)');
+  }
+  const result = await evaluate(`
+    (function() {
+      var target = ${safeString(title_match.toLowerCase())};
+      var chart = ${CHART_API};
+      var studies = (typeof chart.getAllStudies === 'function') ? (chart.getAllStudies() || []) : [];
+      var matched = [];
+      var removed = [];
+      for (var i = 0; i < studies.length; i++) {
+        var s = studies[i];
+        var name = (s && s.name) ? String(s.name) : '';
+        if (name.toLowerCase().indexOf(target) !== -1) {
+          matched.push({ id: s.id, name: name });
+          try {
+            chart.removeEntity(s.id);
+            removed.push({ id: s.id, name: name });
+          } catch (e) { /* keep in matched but not removed */ }
+        }
+      }
+      return { matched: matched, removed: removed };
+    })()
+  `);
+  return {
+    success: result.removed.length === result.matched.length,
+    title_match,
+    matched: result.matched,
+    removed: result.removed,
+  };
+}
+
 export async function getVisibleRange({ _deps } = {}) {
   const { evaluate } = _resolve(_deps);
   const result = await evaluate(`
