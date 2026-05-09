@@ -161,7 +161,13 @@ describe('TradingView MCP — Full E2E (93 tools)', () => {
               // (the live collection + the linking namespace).
               var col = window.TradingViewApi && window.TradingViewApi._chartWidgetCollection;
               if (col) col._replaySessionState = null;
-              var linking = window.TradingViewApi && window.TradingViewApi.linking;
+              // The cached state also lives at chartWidget._linking._chartWidgetCollection
+              // on TV 3.1; nulling only the top-level path leaves the linking copy
+              // intact, which is what survives a TV process restart.
+              var linking = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV
+                && window.TradingViewApi._activeChartWidgetWV.value()
+                && window.TradingViewApi._activeChartWidgetWV.value()._chartWidget
+                && window.TradingViewApi._activeChartWidgetWV.value()._chartWidget._linking;
               if (linking && linking._chartWidgetCollection) linking._chartWidgetCollection._replaySessionState = null;
             } catch(e) {}
           })()
@@ -1227,18 +1233,31 @@ val = array.get(a, 5)`;
   describe('Replay Mode', () => {
 
     after(async () => {
-      // Defensive replay teardown for TV 3.1.0. Both stopReplay and goToRealtime
-      // are needed — stopReplay alone leaves saved-replay state that triggers
-      // a 'Leave current replay?' dialog on subsequent setSymbol calls.
+      // Defensive replay teardown for TV 3.1.0. stopReplay + goToRealtime
+      // dismiss the 'Leave current replay?' dialog on subsequent setSymbol
+      // calls; nulling _replaySessionState on both the chart-widget collection
+      // and the chart linking collection clears the cache that survives even
+      // a TV process restart (per ~/ai/wiki/vendors/tradingview-desktop.md
+      // "Saved replay state survives close").
       // Do NOT call hideReplayToolbar — that path corrupts account state
       // (issue #20, enforced by tests/replay.test.js source audit).
       try {
         await evaluate(`
           (function() {
             var api = window.TradingViewApi && window.TradingViewApi._replayApi;
-            if (!api) return;
-            try { api.stopReplay(); } catch(e) {}
-            try { api.goToRealtime(); } catch(e) {}
+            if (api) {
+              try { api.stopReplay(); } catch(e) {}
+              try { api.goToRealtime(); } catch(e) {}
+            }
+            try {
+              var col = window.TradingViewApi && window.TradingViewApi._chartWidgetCollection;
+              if (col) col._replaySessionState = null;
+              var linking = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV
+                && window.TradingViewApi._activeChartWidgetWV.value()
+                && window.TradingViewApi._activeChartWidgetWV.value()._chartWidget
+                && window.TradingViewApi._activeChartWidgetWV.value()._chartWidget._linking;
+              if (linking && linking._chartWidgetCollection) linking._chartWidgetCollection._replaySessionState = null;
+            } catch(e) {}
           })()
         `);
         await sleep(500);

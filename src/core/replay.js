@@ -110,12 +110,20 @@ export async function autoplay({ speed, _deps } = {}) {
 // already, may be populated from a prior session, or may be re-populated by
 // TV's internal callbacks. We always set it to null because the only path to
 // avoid 'Continue your last replay?' on next restart is empty state at exit.
+// On TV 3.1, the cached session state lives at two paths: the top-level
+// _chartWidgetCollection AND the linking namespace at
+// chartWidget._linking._chartWidgetCollection. The linking copy is what
+// survives a TV process restart, so nulling only the top-level leaves the
+// 'Continue your last replay?' dialog primed for the next launch.
 const CLEAR_SESSION_STATE_JS = `
   (function() {
     try {
       var col = window.TradingViewApi && window.TradingViewApi._chartWidgetCollection;
       if (col) col._replaySessionState = null;
-      var linking = window.TradingViewApi && window.TradingViewApi.linking;
+      var linking = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV
+        && window.TradingViewApi._activeChartWidgetWV.value()
+        && window.TradingViewApi._activeChartWidgetWV.value()._chartWidget
+        && window.TradingViewApi._activeChartWidgetWV.value()._chartWidget._linking;
       if (linking && linking._chartWidgetCollection) linking._chartWidgetCollection._replaySessionState = null;
     } catch(e) {}
   })()
