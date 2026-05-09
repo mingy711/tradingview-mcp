@@ -7,6 +7,7 @@ import {
   getClient as _getClient,
   getChartApi as _getChartApi,
   getChartCollection as _getChartCollection,
+  withReconnect as _withReconnect,
   safeString,
 } from '../connection.js';
 import { waitForChartReady as _waitForChartReady } from '../wait.js';
@@ -21,12 +22,13 @@ function _resolve(deps) {
     getClient: deps?.getClient || _getClient,
     getChartApi: deps?.getChartApi || _getChartApi,
     getChartCollection: deps?.getChartCollection || _getChartCollection,
+    withReconnect: deps?.withReconnect || _withReconnect,
     waitForChartReady: deps?.waitForChartReady || _waitForChartReady,
   };
 }
 
 export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_count, output_dir, _deps }) {
-  const { evaluate, evaluateAsync, getClient, getChartApi, getChartCollection, waitForChartReady } = _resolve(_deps);
+  const { evaluate, evaluateAsync, getChartApi, getChartCollection, withReconnect, waitForChartReady } = _resolve(_deps);
   const tfs = timeframes && timeframes.length > 0 ? timeframes : [null];
   const delay = delay_ms || 2000;
   const results = [];
@@ -53,8 +55,7 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
 
         let actionResult;
         if (action === 'screenshot') {
-          const client = await getClient();
-          const { data } = await client.Page.captureScreenshot({ format: 'png' });
+          const { data } = await withReconnect(c => c.Page.captureScreenshot({ format: 'png' }));
           const ts = new Date().toISOString().replace(/[:.]/g, '-');
           const fname = `batch_${symbol}_${tf || 'default'}_${ts}`.replace(/[/\\]/g, '_') + '.png';
           const filePath = join(targetDir, fname);

@@ -1,7 +1,7 @@
 /**
  * Core screenshot/capture logic.
  */
-import { getClient as _getClient, evaluate as _evaluate, getChartCollection as _getChartCollection } from '../connection.js';
+import { getClient as _getClient, evaluate as _evaluate, getChartCollection as _getChartCollection, withReconnect as _withReconnect } from '../connection.js';
 import { writeFileSync } from 'fs';
 import { join } from 'path';
 import { resolveScreenshotDir } from './paths.js';
@@ -11,11 +11,12 @@ function _resolve(deps) {
     getClient: deps?.getClient || _getClient,
     evaluate: deps?.evaluate || _evaluate,
     getChartCollection: deps?.getChartCollection || _getChartCollection,
+    withReconnect: deps?.withReconnect || _withReconnect,
   };
 }
 
 export async function captureScreenshot({ region, filename, method, output_dir, _deps } = {}) {
-  const { getClient, evaluate, getChartCollection } = _resolve(_deps);
+  const { evaluate, getChartCollection, withReconnect } = _resolve(_deps);
   const targetDir = resolveScreenshotDir(output_dir);
 
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -35,7 +36,6 @@ export async function captureScreenshot({ region, filename, method, output_dir, 
     }
   }
 
-  const client = await getClient();
   let clip = undefined;
 
   if (region === 'chart') {
@@ -66,7 +66,7 @@ export async function captureScreenshot({ region, filename, method, output_dir, 
   const params = { format: 'png' };
   if (clip) params.clip = clip;
 
-  const { data } = await client.Page.captureScreenshot(params);
+  const { data } = await withReconnect(c => c.Page.captureScreenshot(params));
   writeFileSync(filePath, Buffer.from(data, 'base64'));
 
   return {

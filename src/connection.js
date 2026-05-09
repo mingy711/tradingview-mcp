@@ -76,16 +76,62 @@ export function requireFinite(value, name) {
 export async function getClient() {
   if (_testOverrides?.getClient) return _testOverrides.getClient();
   if (client) {
+    let timer;
     try {
-      // Quick liveness check
-      await client.Runtime.evaluate({ expression: '1', returnByValue: true });
+      // Quick liveness check with a hard timeout — a half-dead WS will
+      // accept the request but never respond, hanging the entire MCP call.
+      // Clear the timer on resolution to avoid an unhandled rejection 2s
+      // later when the loser promise is no longer awaited.
+      await Promise.race([
+        client.Runtime.evaluate({ expression: '1', returnByValue: true }),
+        new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('liveness timeout')), 2000); }),
+      ]);
+      clearTimeout(timer);
       return client;
     } catch {
+      clearTimeout(timer);
+      try { await client.close(); } catch {}
       client = null;
       targetInfo = null;
     }
   }
   return connect();
+}
+
+// Errors that should trigger an automatic CDP reconnect rather than bubble
+// up. Observed when the TradingView Desktop process restarts, a tab is
+// closed, or the network blip drops the WebSocket mid-call.
+const RECONNECT_ERR_RE = /connection closed|websocket|ECONNREFUSED|target closed|liveness timeout|socket hang up|disconnected/i;
+
+/**
+ * Run a CDP operation with automatic reconnect on transient connection
+ * failures. Use this for direct `client.Page.*`, `client.DOM.*`,
+ * `client.Input.*` calls — those bypass the cached-client liveness path
+ * inside getClient(), so a stale WS surfaces as an unhandled error.
+ *
+ * Operations passed to `withReconnect` must be idempotent: the runner may
+ * invoke them up to `maxRetries` times after force-resetting the cached
+ * client.
+ */
+export async function withReconnect(operation, maxRetries = 3) {
+  if (_testOverrides?.withReconnect) return _testOverrides.withReconnect(operation, maxRetries);
+  let lastError;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const c = await getClient();
+      return await operation(c);
+    } catch (err) {
+      lastError = err;
+      const msg = err?.message || String(err);
+      if (!RECONNECT_ERR_RE.test(msg)) throw err;
+      try { if (client) await client.close(); } catch {}
+      client = null;
+      targetInfo = null;
+      const delay = Math.min(BASE_DELAY * Math.pow(2, attempt), 5000);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw new Error(`CDP operation failed after ${maxRetries} reconnect attempts: ${lastError?.message || lastError}`);
 }
 
 export async function connect() {
@@ -103,6 +149,13 @@ export async function connect() {
       await client.Runtime.enable();
       await client.Page.enable();
       await client.DOM.enable();
+
+      // Force the chart canvas to keep painting even when this CDP target's
+      // tab is in the background. Background tabs report visibilityState
+      // 'hidden' which pauses requestAnimationFrame — capture_screenshot
+      // returns a blank canvas (HTML overlays render, candles do not).
+      // Per-target setting; must re-apply on every (re)attach.
+      try { await client.Emulation.setFocusEmulationEnabled({ enabled: true }); } catch {}
 
       return client;
     } catch (err) {
@@ -171,6 +224,8 @@ export async function connectToTarget(targetId) {
       await client.Runtime.enable();
       await client.Page.enable();
       await client.DOM.enable();
+      // Re-apply per-target focus emulation. See connect() for rationale.
+      try { await client.Emulation.setFocusEmulationEnabled({ enabled: true }); } catch {}
       targetInfo = { id: targetId };
       return client;
     } catch (err) {
