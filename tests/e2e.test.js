@@ -674,6 +674,15 @@ describe('TradingView MCP — Full E2E (93 tools)', () => {
       try { await coreUi.openPanel({ panel: 'strategy-tester', action: 'close' }); } catch {}
     });
 
+    it('data_get_strategy_info — name + date range (panel-dependent)', async () => {
+      try { await coreUi.openPanel({ panel: 'strategy-tester', action: 'open' }); } catch {}
+      await sleep(500);
+      const r = await coreData.getStrategyInfo();
+      assert.ok('name' in r && 'date_range' in r && 'source' in r, 'shape includes name, date_range, source');
+      assert.ok(r.source === null || ['internal_api', 'dom'].includes(r.source), `source is null or known: ${r.source}`);
+      try { await coreUi.openPanel({ panel: 'strategy-tester', action: 'close' }); } catch {}
+    });
+
     it('data_get_trades — trade list (panel-dependent)', async () => {
       try { await coreUi.openPanel({ panel: 'strategy-tester', action: 'open' }); } catch {}
       await sleep(500);

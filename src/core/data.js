@@ -350,6 +350,44 @@ export async function getTrades({ max_trades, _deps } = {}) {
   return { success: true, trade_count: trades?.trades?.length || 0, total_trade_count: trades?.total_trade_count, source: trades?.source, trades: trades?.trades || [], error: trades?.error };
 }
 
+export async function getStrategyInfo({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  const result = await evaluate(`
+    (function() {
+      var name = null, dateRange = null, source = null;
+      // Prefer internal API for the name — survives locale and DOM rewrites.
+      try {
+        ${FIND_STRATEGY_SRC}
+        var chart = ${CHART_API}._chartWidget;
+        var sources = chart.model().model().dataSources();
+        var strat = __findStrategy(sources);
+        if (strat && strat.metaInfo) {
+          var meta = strat.metaInfo() || {};
+          name = meta.description || meta.shortDescription || meta.title || null;
+          source = 'internal_api';
+        }
+      } catch (e) {}
+      // DOM scrape covers the date range (no clean API surface) and acts as
+      // a fallback when the strategy source isn't on the active chart.
+      try {
+        if (!name) {
+          var nameEl = document.querySelector('[class*="strategyGroup-"] [class*="ellipsisContainer-"]');
+          if (nameEl) { name = nameEl.textContent.trim(); source = 'dom'; }
+        }
+        var dateEl = document.querySelector('[class*="dateRangeMenuWrapper-"] [class*="ellipsisContainer-"]');
+        if (dateEl) dateRange = dateEl.textContent.trim();
+      } catch (e) {}
+      return { name: name, date_range: dateRange, source: source };
+    })()
+  `);
+  return {
+    success: !!(result && result.name),
+    name: result?.name || null,
+    date_range: result?.date_range || null,
+    source: result?.source || null,
+  };
+}
+
 export async function getEquity({ _deps } = {}) {
   const { evaluate } = _resolve(_deps);
   const equity = await evaluate(`

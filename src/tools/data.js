@@ -30,6 +30,11 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  server.tool('data_get_strategy_info', 'Get the active strategy name and Strategy Tester date range. Useful for sanity-checking which strategy + window is loaded before reading metrics. Reads name via internal API (locale-stable) and date_range via DOM (no API surface for it).', {}, async () => {
+    try { return jsonResult(await core.getStrategyInfo()); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   server.tool('data_get_equity', 'Get equity curve data from Strategy Tester', {}, async () => {
     try { return jsonResult(await core.getEquity()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
