@@ -64,6 +64,46 @@ function shieldNegativePositionals(args) {
   return [...args.slice(0, idx), '--', ...args.slice(idx)];
 }
 
+/**
+ * Execute a single command and return its result (no process.exit, no
+ * stdout JSON write). Used by `tv repl` so one CDP client can be reused
+ * across many commands without per-invocation reconnect overhead — the
+ * IDEAS line 211-219 batch-sweep speedup.
+ *
+ * Throws on parse errors / handler errors; caller is responsible for
+ * formatting + writing.
+ */
+export async function runOnce(rawArgs) {
+  const args = shieldNegativePositionals(rawArgs);
+  if (args.length === 0) throw new Error('Empty command');
+
+  const cmdName = args[0];
+  const cmd = commands.get(cmdName);
+  if (!cmd) throw new Error(`Unknown command: ${cmdName}`);
+
+  if (cmd.subcommands) {
+    const subName = args[1];
+    if (!subName) throw new Error(`Subcommand required for ${cmdName}`);
+    const sub = cmd.subcommands.get(subName);
+    if (!sub) throw new Error(`Unknown subcommand: ${cmdName} ${subName}`);
+    const { values, positionals } = parseArgs({
+      args: args.slice(2),
+      options: { help: { type: 'boolean', short: 'h' }, ...(sub.options || {}) },
+      allowPositionals: true,
+      strict: false,
+    });
+    return await sub.handler(values, positionals);
+  }
+
+  const { values, positionals } = parseArgs({
+    args: args.slice(1),
+    options: { help: { type: 'boolean', short: 'h' }, ...(cmd.options || {}) },
+    allowPositionals: true,
+    strict: false,
+  });
+  return await cmd.handler(values, positionals);
+}
+
 export async function run(argv) {
   const args = shieldNegativePositionals(argv.slice(2));
 

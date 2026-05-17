@@ -36,7 +36,7 @@ Sourced from `scripts/audit_forks.sh --top 100` (report at `/tmp/fork_audit.md`)
 ### Still on the backlog
 
 - **KarmicP — validate cloud-persisted values** before round-tripping (alert payloads, watchlist names, layout names). Belt-and-braces against TV-side input that bypasses our local sanitization.
-- **PasanteAdmin — strict `smart_compile` honest success.** We already check study-count delta; their check catches the false-positive when an unrelated study is added concurrently. Tighten ours by filtering by Pine title rather than count.
+- ~~**PasanteAdmin — strict `smart_compile` honest success.**~~ — Shipped 2026-05-17. Diff studies by ID then match new study name against pine-script-title-button text.
 - **prezis — `deployMultipleScripts`** (sequential multi-script deploy with auto-switch between editor slots). Audited 2026-05-09: it's a 433-LOC workflow tool that depends on `pine_switch_script` (which we don't have) and orchestrates `setSource` + `save` + `add-to-chart` per script. Our existing primitives (`pine_set_source`, `pine_smart_compile`, `pine_save`, `chart_manage_indicator`) compose well enough for callers to chain themselves. Worth porting only if user-facing demand surfaces.
 - **prezis — `pine_switch_script`** via the Pine editor dropdown (UI path, not REST). Useful when the script isn't already on chart. Prerequisite for `deployMultipleScripts`.
 - **prezis — `fib-truth.js`** exact OHLCV wick lookup for Fib ground-truth verification.
@@ -54,6 +54,41 @@ below. Each one blocked work in this session — listed in rough priority order.
 
 ### Shipped 2026-05-17
 
+- **`tv repl` persistent CDP session** — `tv repl` reads commands from
+  stdin and writes one JSON-per-line to stdout, reusing a single CDP
+  client across all commands. Live-measured: cold first command 123 ms,
+  subsequent commands 1–5 ms (vs ~500 ms per fresh CLI invocation).
+  Closes the highest-leverage IDEAS line 211-219 perf gap for batch
+  sweeps. parseShellLine handles double/single quotes + escapes; the
+  `tv` prefix is stripped so users can paste either form.
+- **`tv ui mouse --selector`** + `device_pixel_ratio` in `ui_find_element`
+  results — fixes the WSL2 / HiDPI mismatch where CSS-pixel coords from
+  find landed clicks on adjacent elements. Selector path computes the
+  element center then multiplies by devicePixelRatio internally before
+  `Input.dispatchMouseEvent`. Raw x/y path unchanged for callers who
+  already pre-scaled.
+- **`ensurePineEditorOpen` cold-start polish** — cheap
+  `[data-qa-id="pine-editor-dialog"]` presence check short-circuits the
+  heavier FIND_MONACO React fiber walk; polling budget extended from
+  10 s → 20 s; selector cascade adds `[data-qa-id="legend-pine-action"]`
+  as another opener. Fixes the "fresh chart, button doesn't render in
+  budget" timeout case.
+- **Pine compile button selectors strengthened** — fast-path stable
+  `[data-qa-id="add-script-to-chart"]` selector first, then a hardened
+  text walk that skips elements with >30-char labels (defeats the
+  "Untitled scriptAdd to chartAdd to chart…" parent-wrapper trap).
+- **`smart_compile` honest success** — snapshot studies as `{id, name}`
+  arrays before/after, match newly-added studies against the Pine
+  editor's `pine-script-title-button` text. New unrelated study added
+  concurrently no longer falsely reports `study_added: true`. Response
+  surfaces `pine_title`, `new_studies`, `matched_study` for inspection.
+- **`data lines/labels/tables/boxes --include-empty`** — page-side IIFE
+  gate becomes `totalCount > 0 || <flag>`. Surfaces loaded-but-silent
+  studies so callers can distinguish "session indicator not triggered"
+  from "indicator not on chart".
+- **CLI leading-hyphen positional shield** — router auto-inserts `--`
+  before any `^-\d` arg, so `tv indicator add "-4 CB Model"` works
+  without the manual `--` separator.
 - **`tab_new` + `tab_close` rewrite** — `tab_new` was unreliable on TV 3.1+
   because the chart canvas absorbs `Ctrl+T` before Electron's window handler
   sees it. Investigation found that the tab-strip `+` button lives in a
@@ -150,12 +185,8 @@ below. Each one blocked work in this session — listed in rough priority order.
 
 ### Indicators / Pine
 
-- **`tv indicator add` parses leading hyphen in indicator name as a flag.**
-  `tv indicator add "-4 CB Model Indicator"` errors with `Indicator name
-  required` because the CLI argparser sees `-4` as a flag. Workarounds:
-  `tv indicator add -- "-4 CB Model Indicator"` (works), `tv indicator add
-  "_4 CB Model"` (doesn't, wrong name). Reorder parser to accept positional
-  after `--`, or auto-detect this case and emit a helpful hint.
+- ~~**`tv indicator add` parses leading hyphen in indicator name as a flag.**~~ —
+  Shipped 2026-05-17. Router auto-shields `^-\d` positionals with `--`.
 
 - **`tv indicator add USER;<scriptIdPart>` doesn't resolve user-saved Pine
   scripts.** `chart.createStudy(name)` expects a built-in study name; passing
@@ -165,24 +196,12 @@ below. Each one blocked work in this session — listed in rough priority order.
   below). Either add a `--user-script` flag that loads via pine-facade, or
   accept `USER;<id>` directly and route appropriately.
 
-- **`tv pine open <name>` fails with "Could not open Pine Editor" on fresh
-  charts.** The `ensurePineEditorOpen` helper polls for Monaco availability
-  via `FIND_MONACO`, retries the panel-open trigger every 2s, gives up after
-  50 iterations (10s). On a fresh chart tab with no prior Pine activity, the
-  pine-dialog-button doesn't always render within that budget. Either extend
-  the polling or fall back to clicking the visible bottom-panel "Pine Editor"
-  tab via DOM selector.
-
-- **Pine editor "Add to chart" button needs broader selectors for TV 3.1.0+
-  icon-only headers.** `pine compile` looks for buttons with text matching
-  `/save and add to chart/i` or `/^(Add to chart|Update on chart)$/i`. On
-  3.1+ these buttons are icon-only — the label lives in `title` attr — and
-  there may be additional candidates like `Untitled scriptAdd to chartAdd
-  to chartPublish scriptPublish script` parent divs that confuse the matcher.
-  Tested: `tv pine compile` timed out repeatedly even with the indicator
-  source loaded. Worked when I manually clicked at the button's reported
-  coordinates via `tv ui mouse`. Strengthen the selectors and add a
-  click-by-coords fallback.
+- ~~**`tv pine open <name>` fails with "Could not open Pine Editor" on fresh charts.**~~ —
+  Shipped 2026-05-17. Polling extended to 20s, added cheap dialog-presence
+  short-circuit + legend-pine-action opener cascade.
+- ~~**Pine editor "Add to chart" button needs broader selectors for TV 3.1.0+ icon-only headers.**~~ —
+  Shipped 2026-05-17. Fast-path on `[data-qa-id="add-script-to-chart"]`
+  + hardened text walk that skips 30+ char wrapper-div labels.
 
 ### Pine indicator data extraction
 
@@ -190,36 +209,22 @@ below. Each one blocked work in this session — listed in rough priority order.
   Wiki and code both clean as of 2026-05-17. Grep confirms no `.v.y1` path
   in the wiki; `buildGraphicsJS` reads `v.y1` directly. Already fixed.
 
-- **`tv data lines -f "..."` returns empty study list when indicator hasn't
-  yet drawn lines.** For session-triggered indicators (like `-4 CB Model`),
-  the lines exist only between trigger-touch and -4-touch within replay
-  cursor's current session. Returning `{studies: []}` for "no lines drawn yet"
-  is correct but indistinguishable from "indicator not loaded". Add a flag
-  like `--include-empty` so caller can tell the difference.
+- ~~**`tv data lines -f "..."` returns empty study list when indicator hasn't yet drawn lines.**~~ —
+  Shipped 2026-05-17 as `--include-empty` flag on lines / labels / tables / boxes.
 
 ### UI automation
 
-- **`tv ui mouse <x> <y>` click coords don't match `tv ui find` reported
-  positions on overlapping toolbar elements.** `find "Bar replay"` returned
-  3 matching button elements with bounding boxes (947, 0, 88×38). Center
-  click at (991, 19) actually opened the Alert dialog (adjacent button),
-  not Replay. Either DOM rect coords differ from CDP click coords (likely
-  devicePixelRatio mismatch on WSL2-driven Windows TV), OR the reported box
-  belongs to a parent container rather than the leaf button. Reconcile,
-  OR have `tv ui mouse` accept an element-id from a prior `tv ui find` to
-  abstract over the coord-space.
+- ~~**`tv ui mouse <x> <y>` click coords don't match `tv ui find` reported positions.**~~ —
+  Shipped 2026-05-17. `ui_mouse_click` accepts `selector` (computes CSS
+  center → multiplies by devicePixelRatio); `ui_find_element` surfaces
+  `device_pixel_ratio` + per-element `device_x`/`device_y` for callers
+  who want to scale themselves.
 
 ### Performance / DX
 
-- **Per-call CDP target enumeration dominates batch-job runtime.** Each
-  `node tv_spot_check.js <cmd>` call takes 3-10s minimum even for cheap
-  reads, because every invocation re-runs `CDP.List({port: 9222})` and
-  re-attaches. For a 50-session sweep with ~3 commands per session, that's
-  7-25 minutes of pure CDP-setup overhead. A persistent CDP session mode —
-  e.g. `tv repl` that takes stdin commands and emits stdout JSON per line
-  over a single client — would cut this to seconds. Or expose the
-  `tv_spot_check.js` helper pattern (one Node process, multiple
-  Runtime.evaluate calls) as a first-class CLI mode.
+- ~~**Per-call CDP target enumeration dominates batch-job runtime.**~~ —
+  Shipped 2026-05-17 as `tv repl`. Live-measured 1–5 ms per command
+  after cold start (vs ~500 ms per fresh CLI invocation).
 
 ## Held for design discussion
 
