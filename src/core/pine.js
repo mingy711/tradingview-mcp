@@ -745,34 +745,50 @@ export async function newScript({ type, _deps }) {
   return { success: true, type, action: 'new_script_created', template: typeMap[type] };
 }
 
-export async function openScript({ name, _deps }) {
+export async function openScript({ name, id, _deps }) {
+  if (!name && !id) throw new Error('openScript requires either `name` or `id` (scriptIdPart, e.g. "USER;0da8b34c...").');
+
   const { evaluateAsync } = _resolve(_deps);
   const editorReady = await ensurePineEditorOpen({ _deps });
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
-  const escapedName = JSON.stringify(name.toLowerCase());
+  // Normalize id: callers may pass "USER;<hash>" or just "<hash>". The
+  // pine-facade list returns scripts whose scriptIdPart is the full
+  // "USER;<hash>" form, so we compare on that.
+  const normalizedId = id ? (id.startsWith('USER;') ? id : ('USER;' + id)) : null;
+  const escapedName = name ? JSON.stringify(name.toLowerCase()) : 'null';
+  const escapedId = normalizedId ? JSON.stringify(normalizedId) : 'null';
 
   const result = await evaluateAsync(`
     (function() {
-      var target = ${escapedName};
+      var targetName = ${escapedName};
+      var targetId = ${escapedId};
       return fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved', { credentials: 'include' })
         .then(function(r) { return r.json(); })
         .then(function(scripts) {
           if (!Array.isArray(scripts)) return {error: 'pine-facade returned unexpected data'};
           var match = null;
-          for (var i = 0; i < scripts.length; i++) {
-            var sn = (scripts[i].scriptName || '').toLowerCase();
-            var st = (scripts[i].scriptTitle || '').toLowerCase();
-            if (sn === target || st === target) { match = scripts[i]; break; }
-          }
-          if (!match) {
-            for (var j = 0; j < scripts.length; j++) {
-              var sn2 = (scripts[j].scriptName || '').toLowerCase();
-              var st2 = (scripts[j].scriptTitle || '').toLowerCase();
-              if (sn2.indexOf(target) !== -1 || st2.indexOf(target) !== -1) { match = scripts[j]; break; }
+          // Resolve by ID first when given — IDs are unique.
+          if (targetId) {
+            for (var i = 0; i < scripts.length; i++) {
+              if (scripts[i].scriptIdPart === targetId) { match = scripts[i]; break; }
             }
+            if (!match) return {error: 'Script with id "' + targetId + '" not found in your saved scripts.'};
+          } else {
+            for (var i = 0; i < scripts.length; i++) {
+              var sn = (scripts[i].scriptName || '').toLowerCase();
+              var st = (scripts[i].scriptTitle || '').toLowerCase();
+              if (sn === targetName || st === targetName) { match = scripts[i]; break; }
+            }
+            if (!match) {
+              for (var j = 0; j < scripts.length; j++) {
+                var sn2 = (scripts[j].scriptName || '').toLowerCase();
+                var st2 = (scripts[j].scriptTitle || '').toLowerCase();
+                if (sn2.indexOf(targetName) !== -1 || st2.indexOf(targetName) !== -1) { match = scripts[j]; break; }
+              }
+            }
+            if (!match) return {error: 'Script "' + targetName + '" not found. Use pine_list_scripts to see available scripts.'};
           }
-          if (!match) return {error: 'Script "' + target + '" not found. Use pine_list_scripts to see available scripts.'};
 
           var id = match.scriptIdPart;
           var ver = match.version || 1;

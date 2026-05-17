@@ -4,6 +4,7 @@
 import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite, getClient as _getClient, disconnect as _disconnect } from '../connection.js';
 import { waitForChartReady as _waitForChartReady, waitForStudiesReady as _waitForStudiesReady } from '../wait.js';
 import { dismissBlockingDialogs as _dismissBlockingDialogs } from './dialog.js';
+import { openScript as _openScript, smartCompile as _smartCompile } from './pine.js';
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 
@@ -16,6 +17,47 @@ function _resolve(deps) {
     dismissBlockingDialogs: deps?.dismissBlockingDialogs || _dismissBlockingDialogs,
     getClient: deps?.getClient || _getClient,
     disconnect: deps?.disconnect || _disconnect,
+  };
+}
+
+// Add a user-saved Pine script to the chart by routing through the Pine
+// editor. chart.createStudy() only accepts built-in study names; user
+// Pine scripts must be loaded via Monaco + "Add to chart" click.
+//
+// Sequence: open Pine editor → fetch source from pine-facade by ID →
+// inject into Monaco → click "Add to chart" via smartCompile → diff
+// studies to surface the new entity_id.
+async function _addUserScript({ id, _deps }) {
+  const { evaluate } = _resolve(_deps);
+  const beforeIds = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
+
+  // openScript handles "USER;<hash>" or bare hash — normalizes internally.
+  const opened = await _openScript({ id, _deps });
+  const compile = await _smartCompile({ _deps });
+
+  // Studies diff to find the entity_id of the just-added script. smartCompile
+  // already does this internally for honest_success purposes; trust its
+  // matched_study when available, fall back to a manual diff.
+  let entityId = null;
+  if (compile.matched_study && compile.matched_study.id) {
+    entityId = compile.matched_study.id;
+  } else {
+    const afterIds = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
+    const beforeSet = new Set(beforeIds || []);
+    const fresh = (afterIds || []).filter(i => !beforeSet.has(i));
+    entityId = fresh[0] || null;
+  }
+
+  return {
+    success: !!entityId,
+    action: 'add',
+    indicator: id,
+    script_name: opened.name,
+    entity_id: entityId,
+    button_clicked: compile.button_clicked,
+    pine_compile_errors: compile.errors || [],
+    new_study_count: entityId ? 1 : 0,
+    source: 'pine_facade_via_editor',
   };
 }
 
@@ -335,6 +377,15 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
   const inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
 
   if (action === 'add') {
+    // USER;<scriptIdPart> routes through the Pine editor (open script +
+    // smart compile) because chart.createStudy() only accepts built-in
+    // study names. The script source is fetched from pine-facade, loaded
+    // into Monaco, then "Add to chart" is clicked. Same final result as
+    // built-in createStudy but with a different mechanism.
+    if (typeof indicator === 'string' && /^USER;/i.test(indicator)) {
+      return await _addUserScript({ id: indicator, _deps });
+    }
+
     const inputArr = inputs ? Object.entries(inputs).map(([k, v]) => ({ id: k, value: v })) : [];
     const before = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
     await evaluate(`

@@ -350,6 +350,40 @@ describe('core/chart.js — smoke', () => {
     assert.equal(r.success, true);
   });
 
+  it('test_manageIndicator_smoke_routes_USER_to_pine_editor', async () => {
+    // USER;<hash> form should route through _addUserScript rather than
+    // chart.createStudy. We can't mock the entire pine.openScript +
+    // pine.smartCompile chain without dynamic module patching, so this
+    // smoke just asserts the request shape is recognized and the
+    // wrapper attempts the pine path (any thrown error from inside
+    // pine.openScript is OK — it means we got past the routing gate).
+    let createStudyCalled = false;
+    installCdpMocks({
+      evaluate: async (expr) => {
+        if (typeof expr === 'string' && /createStudy\(/.test(expr)) {
+          createStudyCalled = true;
+        }
+        if (typeof expr === 'string' && /getAllStudies/.test(expr)) {
+          return [];
+        }
+        // Force the pine path to throw early — any error proves we routed there
+        return undefined;
+      },
+      evaluateAsync: async () => {
+        throw new Error('routed_to_pine_editor');
+      },
+    });
+    let err;
+    try {
+      await chart.manageIndicator({
+        action: 'add',
+        indicator: 'USER;0da8b34c1497447d88653feb5bf9f33d',
+      });
+    } catch (e) { err = e; }
+    assert.ok(err, 'expected USER; path to throw via the pine editor route');
+    assert.equal(createStudyCalled, false, 'must not call chart.createStudy for USER; scripts');
+  });
+
   it('test_manageIndicator_smoke_remove', async () => {
     const r = await chart.manageIndicator({
       action: 'remove', indicator: 'RSI', entity_id: 'old-1',
