@@ -129,6 +129,54 @@ describe('core/chart.js — setSymbol verification (post-call retry)', () => {
     );
   });
 
+  it('test_setSymbol_surfaces_inert_pine_studies_after_hard_reload', async () => {
+    // After hard reload, TV restores a user Pine study to the layout but
+    // doesn't refetch its source — meta.pine.source is null and _indexes
+    // stays empty. The wrapper detects both and surfaces inert_studies
+    // so the caller doesn't waste time debugging empty data tools.
+    let reloaded = false;
+    installCdpMocks({
+      evaluate: async (expr) => {
+        if (typeof expr === 'string' && /getAllStudies/.test(expr)) return [];
+        if (typeof expr === 'string' && /\.symbol\(\)/.test(expr) && !expr.includes('setSymbol')) {
+          return 'CME_MINI:NQM2026';
+        }
+        if (typeof expr === 'string' && /errorCard|noDataHere/.test(expr)) {
+          return reloaded ? null : "This symbol doesn't exist";
+        }
+        if (typeof expr === 'string' && /isTVScript/.test(expr)) {
+          // Inert detection probe — return one inert Pine study
+          return [{
+            id: 'vxpejS',
+            name: '-4 CB Model Indicator',
+            scriptIdPart: 'USER;0da8b34c1497447d88653feb5bf9f33d',
+            source_present: false,
+            indexes_count: 0,
+          }];
+        }
+        return undefined;
+      },
+      evaluateAsync: async () => undefined,
+    });
+    const r = await chart.setSymbol({
+      symbol: 'CME_MINI:NQM2026',
+      _deps: {
+        waitForChartReady: async () => true,
+        waitForStudiesReady: async () => true,
+        dismissBlockingDialogs: async () => [],
+        getClient: async () => ({ Page: { reload: async () => { reloaded = true; } } }),
+        disconnect: async () => {},
+      },
+    });
+    assert.equal(r.success, true);
+    assert.equal(r.hard_reloaded, true);
+    assert.ok(Array.isArray(r.inert_studies), 'inert_studies populated');
+    assert.equal(r.inert_studies.length, 1);
+    assert.equal(r.inert_studies[0].name, '-4 CB Model Indicator');
+    assert.equal(r.inert_studies[0].source_present, false);
+    assert.ok(r.inert_studies_hint.includes('Pine editor'), 'hint mentions Pine editor');
+  });
+
   it('test_setSymbol_recovers_via_hard_reload', async () => {
     // Stuck through both the first attempt and dialog dismissal; only the
     // hard reload (Page.reload) breaks the stuck state. Mock flips

@@ -234,6 +234,52 @@ export async function setSymbol({ symbol, _deps }) {
   // Not gating — chart.symbol() already confirmed the switch landed.
   const ready = await waitForChartReady(symbol);
   const studies_ready = await waitForStudiesReady();
+
+  // After a hard reload, user-saved Pine studies often stay "inert" — TV
+  // restores their layout reference (id, inputs, scriptIdPart `USER;<hash>`)
+  // but never re-fetches the source from pine-facade, so the study runs
+  // forever with `isRestarting:true` and produces zero output. Callers
+  // about to read drawing data (data_get_pine_lines etc.) will see empty
+  // results; surface the inert studies so they know to re-add via Pine
+  // editor instead of debugging the read path.
+  let inertStudies;
+  if (hardReloaded) {
+    try {
+      const probe = await evaluate(`
+        (function() {
+          try {
+            var chart = ${CHART_API}._chartWidget;
+            var sources = chart.model().model().dataSources();
+            var inert = [];
+            for (var i = 0; i < sources.length; i++) {
+              var s = sources[i];
+              if (!s.metaInfo) continue;
+              var meta;
+              try { meta = s.metaInfo(); } catch(e) { continue; }
+              if (!meta || !meta.isTVScript) continue;
+              // No bar-index entries = study never executed against the
+              // main series. pine.source missing = TV didn't fetch the
+              // script body. Either is sufficient evidence of inertness.
+              var idxCount = (s._graphics && s._graphics._indexes) ? s._graphics._indexes.length : 0;
+              var sourcePresent = !!(meta.pine && meta.pine.source);
+              if (idxCount === 0 || !sourcePresent) {
+                inert.push({
+                  id: typeof s.id === 'function' ? s.id() : (s.id || null),
+                  name: meta.description || meta.shortDescription || 'unknown',
+                  scriptIdPart: meta.scriptIdPart || null,
+                  source_present: sourcePresent,
+                  indexes_count: idxCount,
+                });
+              }
+            }
+            return inert;
+          } catch(e) { return null; }
+        })()
+      `);
+      if (Array.isArray(probe) && probe.length > 0) inertStudies = probe;
+    } catch { /* best effort */ }
+  }
+
   return {
     success: true,
     symbol: actual,
@@ -243,6 +289,10 @@ export async function setSymbol({ symbol, _deps }) {
     dismissed_dialogs: dismissedDialogs.length ? dismissedDialogs : undefined,
     hard_reloaded: hardReloaded || undefined,
     prior_studies: hardReloaded ? priorStudies : undefined,
+    inert_studies: inertStudies,
+    inert_studies_hint: inertStudies
+      ? 'TV restored these user-saved Pine studies from layout but did not refetch their source. Re-add them via the Pine editor (open the script, click "Add to chart") to make them compute again.'
+      : undefined,
   };
 }
 
