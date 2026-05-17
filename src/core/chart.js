@@ -258,16 +258,17 @@ export async function setSymbol({ symbol, _deps }) {
               try { meta = s.metaInfo(); } catch(e) { continue; }
               if (!meta || !meta.isTVScript) continue;
               // No bar-index entries = study never executed against the
-              // main series. pine.source missing = TV didn't fetch the
-              // script body. Either is sufficient evidence of inertness.
+              // main series. This is the only reliable inertness signal —
+              // meta.pine.source is null even for working Pine studies
+              // on TV 3.1 (verified empirically; TV doesn't expose the
+              // compiled source client-side), so checking !sourcePresent
+              // produces false positives on healthy studies.
               var idxCount = (s._graphics && s._graphics._indexes) ? s._graphics._indexes.length : 0;
-              var sourcePresent = !!(meta.pine && meta.pine.source);
-              if (idxCount === 0 || !sourcePresent) {
+              if (idxCount === 0) {
                 inert.push({
                   id: typeof s.id === 'function' ? s.id() : (s.id || null),
                   name: meta.description || meta.shortDescription || 'unknown',
                   scriptIdPart: meta.scriptIdPart || null,
-                  source_present: sourcePresent,
                   indexes_count: idxCount,
                 });
               }

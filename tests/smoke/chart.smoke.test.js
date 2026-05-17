@@ -150,7 +150,6 @@ describe('core/chart.js — setSymbol verification (post-call retry)', () => {
             id: 'vxpejS',
             name: '-4 CB Model Indicator',
             scriptIdPart: 'USER;0da8b34c1497447d88653feb5bf9f33d',
-            source_present: false,
             indexes_count: 0,
           }];
         }
@@ -173,7 +172,7 @@ describe('core/chart.js — setSymbol verification (post-call retry)', () => {
     assert.ok(Array.isArray(r.inert_studies), 'inert_studies populated');
     assert.equal(r.inert_studies.length, 1);
     assert.equal(r.inert_studies[0].name, '-4 CB Model Indicator');
-    assert.equal(r.inert_studies[0].source_present, false);
+    assert.equal(r.inert_studies[0].indexes_count, 0);
     assert.ok(r.inert_studies_hint.includes('Pine editor'), 'hint mentions Pine editor');
   });
 
