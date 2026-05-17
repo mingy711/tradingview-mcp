@@ -117,6 +117,124 @@ describe('start() — date selection and polling', () => {
     assert.ok(pollCount >= 4, 'polled multiple times');
   });
 
+  // ── scroll_back path ────────────────────────────────────────────────
+  it('scrollBack=true short-circuits when target already in buffer', async () => {
+    // Target: 2026-04-01 00:00 UTC (ts 1775347200 sec). Buffer starts at 2026-03-15 (1773532800).
+    // 2026-04-01 > 2026-03-15 → already covered.
+    // Mocked evaluate returns the EVALUATED result, not the raw bar tuple —
+    // the page-side function extracts Number(v[0]), so the mock returns
+    // that scalar directly.
+    const dispatched = [];
+    const evaluate = async (expr) => {
+      if (expr.includes('isReplayAvailable')) return true;
+      if (expr.includes('bars.valueAt(bars.firstIndex())')) return 1773532800;
+      if (expr.includes('isReplayStarted')) return true;
+      if (expr.includes('currentDate')) return 1775347200;
+      if (expr.includes('showReplayToolbar') || expr.includes('selectDate')) return 'ok';
+      return undefined;
+    };
+    evaluate.calls = [];
+    const getClient = async () => ({
+      Input: { dispatchMouseEvent: async (args) => { if (args.type === 'mouseWheel') dispatched.push(args); } },
+      close: async () => {},
+    });
+    const result = await start({
+      date: '2026-04-01', scrollBack: true,
+      _deps: { evaluate, getReplayApi: mockGetReplayApi(), getClient },
+    });
+    assert.equal(result.success, true);
+    assert.equal(result.scroll_back.loaded, true);
+    assert.equal(result.scroll_back.attempts, 0);
+    assert.equal(result.scroll_back.reason, 'already_covered');
+    assert.equal(dispatched.length, 0, 'no wheel events dispatched');
+  });
+
+  it('scrollBack=true loops until target is in buffer', async () => {
+    // Target 2026-01-01 (1767225600 sec). Buffer starts at 2026-03-15 (1773532800).
+    // Need to load 2026-01-01..03-15 ≈ 73 days backward.
+    // Simulate each wheel batch advancing firstSec back by 5 days (432000s).
+    const target = 1767225600;
+    let firstSec = 1773532800;
+    const advancePerBatch = 5 * 86400;
+    const dispatched = [];
+    let wheelInBatch = 0;
+    const evaluate = async (expr) => {
+      if (expr.includes('isReplayAvailable')) return true;
+      if (expr.includes('bars.valueAt(bars.firstIndex())')) return firstSec;
+      if (expr.includes('pane-canvas')) return { x: 0, y: 0, w: 800, h: 600, dpr: 1 };
+      if (expr.includes('isReplayStarted')) return true;
+      if (expr.includes('currentDate')) return target;
+      if (expr.includes('showReplayToolbar') || expr.includes('selectDate')) return 'ok';
+      return undefined;
+    };
+    evaluate.calls = [];
+    const getClient = async () => ({
+      Input: {
+        dispatchMouseEvent: async (args) => {
+          if (args.type === 'mouseWheel') {
+            dispatched.push(args);
+            wheelInBatch++;
+            if (wheelInBatch >= 40) {
+              firstSec -= advancePerBatch;
+              wheelInBatch = 0;
+            }
+          }
+        },
+      },
+      close: async () => {},
+    });
+    const result = await start({
+      date: '2026-01-01', scrollBack: true,
+      _deps: { evaluate, getReplayApi: mockGetReplayApi(), getClient },
+    });
+    assert.equal(result.success, true);
+    assert.equal(result.scroll_back.loaded, true);
+    assert.equal(result.scroll_back.reason, 'reached_target');
+    assert.ok(result.scroll_back.attempts >= 14, `expected ≥14 attempts to cover 73 days at 5d/attempt, got ${result.scroll_back.attempts}`);
+    assert.ok(result.scroll_back.firstTsAfter <= target, `firstTsAfter ${result.scroll_back.firstTsAfter} should be ≤ target ${target}`);
+  });
+
+  it('scrollBack=true bails out after no_more_history when TV stops loading', async () => {
+    // Target 2024-01-01. Buffer starts at 2026-03-15. TV refuses to load
+    // anything more after 2 batches.
+    let firstSec = 1773532800;
+    let scrollsAccepted = 0;
+    let wheelInBatch = 0;
+    const evaluate = async (expr) => {
+      if (expr.includes('isReplayAvailable')) return true;
+      if (expr.includes('bars.valueAt(bars.firstIndex())')) return firstSec;
+      if (expr.includes('pane-canvas')) return { x: 0, y: 0, w: 800, h: 600, dpr: 1 };
+      if (expr.includes('isReplayStarted')) return true;
+      if (expr.includes('currentDate')) return firstSec;
+      if (expr.includes('showReplayToolbar') || expr.includes('selectDate')) return 'ok';
+      return undefined;
+    };
+    evaluate.calls = [];
+    const getClient = async () => ({
+      Input: {
+        dispatchMouseEvent: async (args) => {
+          if (args.type === 'mouseWheel') {
+            wheelInBatch++;
+            if (wheelInBatch >= 40) {
+              wheelInBatch = 0;
+              scrollsAccepted++;
+              if (scrollsAccepted <= 2) firstSec -= 86400;  // 1 day per batch, twice
+              // after that, firstSec doesn't change → no_more_history
+            }
+          }
+        },
+      },
+      close: async () => {},
+    });
+    const result = await start({
+      date: '2024-01-01', scrollBack: true,
+      _deps: { evaluate, getReplayApi: mockGetReplayApi(), getClient },
+    });
+    assert.equal(result.scroll_back.reason, 'no_more_history');
+    assert.equal(result.scroll_back.loaded, false);
+    assert.ok(result.scroll_back.attempts >= 4, `expected ≥4 attempts before bailing (2 progress + 2 no-progress), got ${result.scroll_back.attempts}`);
+  });
+
   it('throws and stops replay when polling times out (never started)', async () => {
     let stopCalled = false;
     const evaluate = async (expr) => {

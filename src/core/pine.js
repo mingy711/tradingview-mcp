@@ -935,81 +935,240 @@ export async function listScripts({ _deps } = {}) {
 }
 
 /**
- * Switch the Pine editor to a different saved script via the UI dropdown.
- * Properly switches editor context (unlike pine_open which just sets the
- * source code). Steps: click nameButton → find target script entry by
- * textContent in the dropdown → dispatch a real mousePressed/mouseReleased
- * pair at its coordinates → verify the nameButton now shows the new name.
+ * Switch the Pine editor to a different saved script via the UI.
+ * Properly switches editor context (unlike pine_open, which just rewrites
+ * the source via Monaco — leaves the title button stale).
+ *
+ * On TV 3.1+ the title-button dropdown is a *context menu* (Save/Copy/
+ * Rename/...), not a script-list dropdown. The recent-scripts subsection
+ * only carries ~4 entries. The reliable path is the "Open script…" picker
+ * (Ctrl+O), which has a search box and lists every saved script.
+ *
+ * Steps:
+ *   1. Focus the Pine editor and send Ctrl+O.
+ *   2. Wait for [data-name="open-user-script-dialog"].
+ *   3. Set the search input via the React-friendly native setter, then
+ *      dispatch 'input' so React's onChange fires.
+ *   4. Find the list row whose title prefix-matches `name`. Use exact
+ *      title-portion match (text before "Version:") to disambiguate
+ *      "Foo" from "Foo v2".
+ *   5. Invoke the React onClick on .itemInfo-gisYB8vu with a full
+ *      SyntheticEvent shape (TV's handler calls isDefaultPrevented()).
+ *   6. Close the dialog via mouse-event sequence on [data-qa-id="close"]
+ *      (ESC is ignored by TV's dialog).
+ *   7. Verify the title button now shows the requested name.
  */
 export async function switchScript({ name, _deps }) {
-  const { evaluate, getClient } = _resolve(_deps);
+  const { evaluate, evaluateAsync } = _resolve(_deps);
   const editorReady = await ensurePineEditorOpen({ _deps });
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
+  const TITLE_BTN = `(document.querySelector('[data-qa-id="pine-script-title-button"]') || document.querySelector('[class*="nameButton"]'))`;
+
   const currentBefore = await evaluate(`
     (function() {
-      var btn = document.querySelector('[class*="nameButton"]');
-      return btn ? btn.textContent.trim() : null;
+      var btn = ${TITLE_BTN};
+      return btn ? (btn.textContent || '').trim() : null;
     })()
   `);
   if (currentBefore === name) {
     return { success: true, requested: name, current: name, shortCircuited: true };
   }
 
-  const dropdownOpened = await evaluate(`
-    (function() {
-      var btn = document.querySelector('[class*="nameButton"]');
-      if (!btn) return false;
-      btn.click();
-      return true;
-    })()
-  `);
-  if (!dropdownOpened) throw new Error('Could not find Pine editor nameButton dropdown');
+  // Clear any open menus (title button may have been clicked earlier).
+  await evaluate(`(function() {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key:'Escape', code:'Escape', keyCode:27, which:27, bubbles:true }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key:'Escape', code:'Escape', keyCode:27, which:27, bubbles:true }));
+  })()`);
+  await new Promise(r => setTimeout(r, 200));
 
-  await new Promise(r => setTimeout(r, 500));
+  // Focus the Pine editor textarea so Ctrl+O is captured by Monaco /
+  // TV's script-editor keybinding, not by some other panel.
+  await evaluate(`(function() {
+    var c = document.querySelector('.pine-editor-monaco') || document.querySelector('[class*="pine-editor"]');
+    var ta = c && c.querySelector('textarea');
+    if (ta) ta.focus();
+  })()`);
+  await new Promise(r => setTimeout(r, 100));
 
-  const escapedName = JSON.stringify(name);
-  const coords = await evaluate(`
-    (function() {
-      var target = ${escapedName};
-      var allEls = document.querySelectorAll('*');
-      for (var el of allEls) {
-        var t = (el.textContent || '').trim();
-        if (t === target && el.offsetParent !== null && el.offsetHeight > 15 && el.offsetHeight < 40 && el.childElementCount <= 1) {
-          var rect = el.getBoundingClientRect();
-          return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+  // Ctrl+O — the shortcut shown on the "Open script…" menu item.
+  await evaluate(`(function() {
+    var t = document.activeElement || document.body;
+    function ev(type) {
+      return new KeyboardEvent(type, {
+        key: 'o', code: 'KeyO', keyCode: 79, which: 79,
+        ctrlKey: true, bubbles: true, cancelable: true,
+      });
+    }
+    t.dispatchEvent(ev('keydown'));
+    t.dispatchEvent(ev('keypress'));
+    t.dispatchEvent(ev('keyup'));
+  })()`);
+
+  // Poll for the picker dialog to mount. Must use evaluateAsync so the
+  // Promise actually resolves on the page side before returning.
+  const dialogReady = await evaluateAsync(`
+    new Promise(function(resolve) {
+      var elapsed = 0;
+      var iv = setInterval(function() {
+        if (document.querySelector('[data-name="open-user-script-dialog"]')) {
+          clearInterval(iv); resolve(true);
         }
-      }
-      return null;
-    })()
+        elapsed += 50;
+        if (elapsed >= 2000) { clearInterval(iv); resolve(false); }
+      }, 50);
+    })
   `);
+  if (!dialogReady) throw new Error('Open-script picker dialog did not appear after Ctrl+O.');
 
-  if (!coords) {
-    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true}))`);
-    throw new Error('Script "' + name + '" not found in dropdown. Check pine_list_scripts for available names.');
+  // Type the name into the search box. React inputs ignore plain
+  // `input.value = x` — use the native setter then dispatch 'input'.
+  const escapedName = JSON.stringify(name);
+  await evaluate(`(function() {
+    var dialog = document.querySelector('[data-name="open-user-script-dialog"]');
+    var input = dialog && (dialog.querySelector('input[role="searchbox"]') || dialog.querySelector('input'));
+    if (!input) return;
+    var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, ${escapedName});
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await new Promise(r => setTimeout(r, 400));
+
+  // Find the row matching `name` and invoke its React onClick.
+  // List rows are bare DIVs (no role/data-name); structure is
+  //   <div>
+  //     <div.itemInfo-gisYB8vu> ← onClick handler lives here
+  //       <...title text...>Version: ...
+  //     </div>
+  //     <span.favorite-_FRQhM5Y onClick> <span.button-... onClick onMouseDown>
+  //   </div>
+  // Match the title portion (text before "Version:") for exact equality
+  // so "Foo" doesn't accidentally select "Foo v2".
+  const clickResult = await evaluate(`(function() {
+    var dialog = document.querySelector('[data-name="open-user-script-dialog"]');
+    if (!dialog) return { error: 'dialog missing after search' };
+    var listContainer = dialog.querySelector('.list-AhaeiE0y') || dialog.querySelector('[class*="list-AhaeiE0y"]');
+    var itemsRoot = listContainer && listContainer.firstElementChild;
+    var items = itemsRoot ? Array.prototype.slice.call(itemsRoot.children) : [];
+    if (items.length === 0) return { error: 'no_results_in_picker', searched: ${escapedName} };
+
+    function titlePart(text) {
+      var idx = text.indexOf('Version:');
+      return (idx >= 0 ? text.slice(0, idx) : text).trim();
+    }
+
+    var target = ${escapedName};
+    var exact = null;
+    var prefix = null;
+    for (var i = 0; i < items.length; i++) {
+      var t = items[i].textContent || '';
+      if (titlePart(t) === target) { exact = items[i]; break; }
+      if (!prefix && t.indexOf(target) === 0) prefix = items[i];
+    }
+    var match = exact || prefix;
+    if (!match) {
+      return {
+        error: 'no_match',
+        searched: target,
+        results: items.slice(0, 10).map(function(el) { return titlePart(el.textContent || ''); }),
+      };
+    }
+
+    var info = match.querySelector('.itemInfo-gisYB8vu');
+    if (!info) {
+      // fallback: first descendant carrying a React onClick
+      var all = match.querySelectorAll('*');
+      for (var j = 0; j < all.length; j++) {
+        var el = all[j];
+        var pk = Object.keys(el).find(function(k) { return k.indexOf('__reactProps$') === 0; });
+        if (pk && el[pk] && typeof el[pk].onClick === 'function') { info = el; break; }
+      }
+    }
+    if (!info) return { error: 'no_clickable_element_in_row' };
+
+    var propKey = Object.keys(info).find(function(k) { return k.indexOf('__reactProps$') === 0; });
+    var props = propKey ? info[propKey] : null;
+    if (!props || typeof props.onClick !== 'function') return { error: 'no_react_onclick' };
+
+    var ev = {
+      preventDefault: function() {}, stopPropagation: function() {},
+      isDefaultPrevented: function() { return false; },
+      isPropagationStopped: function() { return false; },
+      persist: function() {},
+      currentTarget: info, target: info,
+      nativeEvent: { type: 'click' }, type: 'click',
+      button: 0, buttons: 1, bubbles: true, cancelable: true,
+    };
+    try { props.onClick(ev); }
+    catch (e) { return { error: 'onclick_threw', detail: String(e) }; }
+    return { ok: true, matched_via: exact ? 'exact_title' : 'prefix' };
+  })()`);
+
+  if (clickResult && clickResult.error) {
+    // Close the dialog so the editor isn't left stuck open.
+    await _closeOpenScriptDialog(evaluate);
+    if (clickResult.error === 'no_match') {
+      throw new Error(`Script "${name}" not found in picker. Available results (first 10): ${(clickResult.results || []).join(', ')}`);
+    }
+    if (clickResult.error === 'no_results_in_picker') {
+      throw new Error(`Script "${name}" not found in picker (search returned 0 results). Check pine_list_scripts for available names.`);
+    }
+    throw new Error(`switchScript failed: ${clickResult.error}${clickResult.detail ? ' — ' + clickResult.detail : ''}`);
   }
 
-  const c = await getClient();
-  await c.Input.dispatchMouseEvent({ type: 'mousePressed', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
-  await c.Input.dispatchMouseEvent({ type: 'mouseReleased', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
+  // Wait for title-button text to reflect the new script (TV updates it
+  // after the load completes — Monaco setValue is sync, but title binding
+  // goes through a redux dispatch).
+  let currentName = null;
+  for (let i = 0; i < 40; i++) {
+    currentName = await evaluate(`
+      (function() {
+        var btn = ${TITLE_BTN};
+        return btn ? (btn.textContent || '').trim() : null;
+      })()
+    `);
+    if (currentName === name) break;
+    await new Promise(r => setTimeout(r, 50));
+  }
 
-  await new Promise(r => setTimeout(r, 1000));
-
-  const currentName = await evaluate(`
-    (function() {
-      var btn = document.querySelector('[class*="nameButton"]');
-      return btn ? btn.textContent.trim() : 'unknown';
-    })()
-  `);
+  // Close picker regardless of outcome so the editor is usable.
+  await _closeOpenScriptDialog(evaluate);
 
   if (currentName !== name) {
     throw new Error(
-      `switchScript failed: requested "${name}" but nameButton shows "${currentName}". ` +
-      `The dropdown click at (${coords.x}, ${coords.y}) may have missed the target.`
+      `switchScript: clicked picker row but title button still shows "${currentName}" (expected "${name}"). ` +
+      `Source may have been updated; reload TV if title binding looks stuck.`
     );
   }
 
-  return { success: true, requested: name, current: currentName, coords };
+  return {
+    success: true,
+    requested: name,
+    current: currentName,
+    matched_via: clickResult.matched_via,
+  };
+}
+
+// Close the open-user-script-dialog by firing a real mouse-event
+// sequence on its X button. ESC keydown is silently ignored by TV's
+// picker; only mousedown+mouseup+click on [data-qa-id="close"] works.
+async function _closeOpenScriptDialog(evaluate) {
+  await evaluate(`(function() {
+    var dialog = document.querySelector('[data-name="open-user-script-dialog"]');
+    if (!dialog) return;
+    var btn = dialog.querySelector('[data-qa-id="close"]');
+    if (!btn) return;
+    var r = btn.getBoundingClientRect();
+    function fire(type) {
+      btn.dispatchEvent(new MouseEvent(type, {
+        bubbles: true, cancelable: true, view: window,
+        clientX: r.x + r.width/2, clientY: r.y + r.height/2,
+        button: 0, buttons: 1,
+      }));
+    }
+    fire('mousedown'); fire('mouseup'); fire('click');
+  })()`);
+  await new Promise(r => setTimeout(r, 200));
 }
 
 // Open the Pine title-button menu and click an item (with optional submenu).

@@ -37,8 +37,8 @@ Sourced from `scripts/audit_forks.sh --top 100` (report at `/tmp/fork_audit.md`)
 
 - **KarmicP — validate cloud-persisted values** before round-tripping (alert payloads, watchlist names, layout names). Belt-and-braces against TV-side input that bypasses our local sanitization.
 - ~~**PasanteAdmin — strict `smart_compile` honest success.**~~ — Shipped 2026-05-17. Diff studies by ID then match new study name against pine-script-title-button text.
-- **prezis — `deployMultipleScripts`** (sequential multi-script deploy with auto-switch between editor slots). Audited 2026-05-09: it's a 433-LOC workflow tool that depends on `pine_switch_script` (which we don't have) and orchestrates `setSource` + `save` + `add-to-chart` per script. Our existing primitives (`pine_set_source`, `pine_smart_compile`, `pine_save`, `chart_manage_indicator`) compose well enough for callers to chain themselves. Worth porting only if user-facing demand surfaces.
-- **prezis — `pine_switch_script`** via the Pine editor dropdown (UI path, not REST). Useful when the script isn't already on chart. Prerequisite for `deployMultipleScripts`.
+- **prezis — `deployMultipleScripts`** (sequential multi-script deploy with auto-switch between editor slots). Audited 2026-05-09: it's a 433-LOC workflow tool that orchestrates `setSource` + `save` + `add-to-chart` per script. Our existing primitives (`pine_set_source`, `pine_smart_compile`, `pine_save`, `chart_manage_indicator`, `pine_switch_script`) compose well enough for callers to chain themselves. Worth porting only if user-facing demand surfaces.
+- ~~**prezis — `pine_switch_script`**~~ — Shipped 2026-05-17. TV 3.1+ title-button dropdown is a context menu (Save/Copy/Rename), NOT a script list. Switching uses the Ctrl+O picker instead: focus pine editor → Ctrl+O → React-friendly setter on search input → React onClick on `.itemInfo-gisYB8vu` row → close via mouse-event sequence on `[data-qa-id="close"]`. Updates the editor's title binding (unlike `pine_open` which only rewrites source).
 - **prezis — `fib-truth.js`** exact OHLCV wick lookup for Fib ground-truth verification.
 - **KarmicP — replay CLI ergonomics.** `--chart`/`-c` to switch tab before replay; `--layout`/`-l` to load a saved layout first; compound `replay_start` accepting flexible date formats.
 - **yaojinhui1993 — chart data download workflow.** `target_id` + filename params for bulk OHLCV export via TV's native download path; complements our 500-bar `data_get_ohlcv` cap.
@@ -146,32 +146,24 @@ below. Each one blocked work in this session — listed in rough priority order.
 
 ### Replay API
 
-- **`replay_start --date` only handles day-precision strings; needs ISO-with-time.**
-  `_replayApi.selectDate(ms)` accepts full ms precision (cursor lands on exact
-  second when called directly via CDP eval). The MCP wrapper's
-  `new Date("YYYY-MM-DD").getTime()` zero-fills the time component, so callers
-  can't position the cursor at e.g. `09:33 ET`. Accept `YYYY-MM-DDTHH:MM:SSZ`
-  or `YYYY-MM-DD HH:MM` and pass ms through unchanged. Tested: passing
-  `"2026-05-08T09:33:00-04:00"` to the existing wrapper works (`new Date`
-  parses ISO with offset) but isn't documented. Document or formalize.
+- ~~**`replay_start --date` only handles day-precision strings.**~~ —
+  Shipped 2026-05-17. Wrapper accepts ISO-with-time; tool/CLI docs name
+  the supported formats explicitly.
 
-- **`replay_start` should clear `_replaySessionState` before every `selectDate`,
-  not just on `stop`.** When replay is already started and you call
-  `selectDate(new_target)`, TV silently restores the cached cursor from
-  `_replaySessionState` instead of moving to the new target. The clear logic
-  in `core/replay.js stop()` exists; lift it into a helper that runs at the
-  top of `start()` too. Both paths must be nulled:
-  `_chartWidgetCollection._replaySessionState` AND
-  `_activeChartWidgetWV.value()._chartWidget._linking._chartWidgetCollection._replaySessionState`.
+- ~~**`replay_start` should clear `_replaySessionState` before every `selectDate`.**~~ —
+  Shipped 2026-05-17. Active-replay re-call now does
+  `stopReplay` + clear both `_replaySessionState` paths + 300 ms settle
+  before `selectDate`. Cursor poll is target-aware (60 s window).
 
-- **`selectDate` silently clamps backward jumps to unloaded historical
-  dates.** TV's chart series doesn't fetch earlier 30s bars via `selectDate`;
-  the cursor stays at the previously-loaded buffer's last bar with no error.
-  Forward jumps (to dates after current buffer) DO trigger a server-side load.
-  Backward jumps within the loaded range work. Backward jumps outside it
-  don't. Document this in `replay_start` help text and consider a
-  `--scroll-back` option that simulates UI mouse-wheel pans to force backward
-  loads.
+- ~~**`selectDate` silently clamps backward jumps to unloaded historical
+  dates.**~~ — Detection shipped 2026-05-17 (drift_seconds + warning >5 min).
+  Recovery shipped 2026-05-17 (`replay_start scroll_back: true` / CLI
+  `--scroll-back`). Pre-engages backward loads via mouseWheel events on
+  the main chart pane BEFORE `showReplayToolbar` (data feed freezes once
+  replay engages). Loops until `bars.firstIndex()` timestamp ≤ target,
+  bails on two consecutive no-progress iterations (`no_more_history`),
+  or hits 30-attempt cap. Result reports `scroll_back: { loaded,
+  attempts, firstTsBefore, firstTsAfter, reason }`.
 
 - ~~**`_replayUIController.disableReplayMode()` doesn't actually stop replay.**~~ —
   Informational only; our `core/replay.js stop()` already calls
@@ -181,16 +173,12 @@ below. Each one blocked work in this session — listed in rough priority order.
 
 ### Chart / symbol
 
-- **`chart.setSymbol` stuck-state is irrecoverable from CDP.** When the chart
-  enters a stuck state (cumulative side-effects from prior failed/in-flight
-  ops, or stale `_replaySessionState`), subsequent setSymbol calls return
-  success silently while `chart.symbol()` stays at the old value. Even
-  round-tripping (setSymbol A → setSymbol B → setSymbol A) doesn't recover.
-  The MCP detects mismatch and emits "may be in a stuck saved-replay state
-  — try replay_stop or restarting TV" but `replay_stop` doesn't fix it.
-  Real recovery needs `Page.reload`. Add `tv reconnect --hard` that does
-  the reload, OR have `setSymbol`'s retry path auto-trigger a hard reload
-  after the dialog-dismissal retry also fails.
+- ~~**`chart.setSymbol` stuck-state is irrecoverable from CDP.**~~ —
+  Shipped 2026-05-17. `setSymbol` has a three-tier recovery cascade
+  (dialog dismissal → hard reload via `Page.reload`) and additionally
+  detects "This symbol doesn't exist" / "No data here" overlays that
+  appear when the JS API matches but the data layer is broken.
+  Response carries `hard_reloaded:true` + `prior_studies`.
 
 - ~~**`tv tab switch <n>` doesn't propagate to subsequent commands.**~~ —
   Verified working 2026-05-17: `tab switch 2` to `N6mimYXe` chart followed
@@ -211,9 +199,8 @@ below. Each one blocked work in this session — listed in rough priority order.
 - ~~**`tv indicator add USER;<scriptIdPart>` doesn't resolve user-saved
   Pine scripts.**~~ — Shipped 2026-05-17. `chart_manage_indicator` detects
   `USER;` prefix, opens the script via pine-facade by ID, clicks Add to
-  chart via the hardened smart_compile path. **Currently blocked by the
-  FIND_MONACO regression above** — routing is correct; will start working
-  once Monaco editor location is restored.
+  chart via the hardened smart_compile path. Live-validated end-to-end
+  after FIND_MONACO restoration.
 
 - ~~**`tv pine open <name>` fails with "Could not open Pine Editor" on fresh charts.**~~ —
   Shipped 2026-05-17. Polling extended to 20s, added cheap dialog-presence

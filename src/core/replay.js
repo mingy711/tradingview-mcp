@@ -1,7 +1,7 @@
 /**
  * Core replay mode logic.
  */
-import { evaluate as _evaluate, getReplayApi as _getReplayApi, getReplayUIController as _getReplayUIController, safeString } from '../connection.js';
+import { evaluate as _evaluate, getReplayApi as _getReplayApi, getReplayUIController as _getReplayUIController, getClient as _getClient, safeString } from '../connection.js';
 import { dismissBlockingDialogs } from './dialog.js';
 
 export const VALID_AUTOPLAY_DELAYS = [100, 143, 200, 300, 1000, 2000, 3000, 5000, 10000];
@@ -27,10 +27,142 @@ function _resolve(deps) {
     evaluate: deps?.evaluate || _evaluate,
     getReplayApi: deps?.getReplayApi || _getReplayApi,
     getReplayUIController: deps?.getReplayUIController || _getReplayUIController,
+    getClient: deps?.getClient || _getClient,
   };
 }
 
-export async function start({ date, _deps } = {}) {
+/**
+ * Force TV to load historical bars backward so the buffer covers `targetTs`.
+ *
+ * TV's chart only fetches more historical bars when the user (or code)
+ * scrolls past the current first loaded bar — there's no "fetch up to date X"
+ * API. Once we engage replay (showReplayToolbar/selectDate), the data feed
+ * is frozen and no further backward loads happen. So this must run BEFORE
+ * selectDate; the caller pre-extends the buffer, then engages replay.
+ *
+ * Mechanism: dispatch synthesized mouseWheel events at the main chart pane
+ * canvas. Each batch of wheel events loads a chunk of older bars (server
+ * decides chunk size; typically 50-200 bars per batch on intraday TFs).
+ * We loop until the buffer's first bar timestamp is ≤ targetTs, OR we hit
+ * `maxAttempts`, OR two consecutive attempts make no progress (TV has run
+ * out of history on this symbol/TF).
+ *
+ * Returns { loaded, attempts, firstTsBefore, firstTsAfter, reason }.
+ */
+async function _scrollBackToTarget(targetTs, _deps, opts = {}) {
+  const { evaluate, getClient } = _resolve(_deps);
+  const maxAttempts = opts.maxAttempts ?? 30;
+  const wheelsPerAttempt = opts.wheelsPerAttempt ?? 40;
+  const settleMs = opts.settleMs ?? 1200;
+
+  const client = await getClient();
+
+  async function readFirstTs() {
+    return await evaluate(`(function() {
+      try {
+        var bars = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries().bars();
+        var v = bars.valueAt(bars.firstIndex());
+        return v ? Number(v[0]) : null;
+      } catch(e) { return null; }
+    })()`);
+  }
+
+  async function readPaneRect() {
+    return await evaluate(`(function() {
+      // Prefer the canvas of the ACTIVE chart widget (multi-chart layouts
+      // make "largest visible" unreliable). Fall back to largest visible
+      // pane-canvas if widget DOM traversal fails.
+      function fromActive() {
+        try {
+          var w = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+          var panes = (typeof w.paneWidgets === 'function') ? w.paneWidgets() : null;
+          var container = (panes && panes[0] && panes[0].getElement) ? panes[0].getElement() : null;
+          if (!container) return null;
+          var c = container.querySelector('canvas[data-name="pane-canvas"]');
+          return c || null;
+        } catch(e) { return null; }
+      }
+      function fromLargest() {
+        var list = Array.prototype.filter.call(
+          document.querySelectorAll('canvas[data-name="pane-canvas"]'),
+          function(c) { return c.offsetParent !== null; }
+        );
+        if (list.length === 0) return null;
+        list.sort(function(a, b) {
+          var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+          return (rb.width * rb.height) - (ra.width * ra.height);
+        });
+        return list[0];
+      }
+      var canvas = fromActive() || fromLargest();
+      if (!canvas) return null;
+      var r = canvas.getBoundingClientRect();
+      return { x: r.x, y: r.y, w: r.width, h: r.height, dpr: window.devicePixelRatio || 1 };
+    })()`);
+  }
+
+  const firstTsBefore = await readFirstTs();
+  const targetSec = Math.floor(targetTs / 1000);
+
+  if (firstTsBefore === null) {
+    return { loaded: false, attempts: 0, firstTsBefore, firstTsAfter: null, reason: 'no_chart_data' };
+  }
+  if (firstTsBefore <= targetSec) {
+    return { loaded: true, attempts: 0, firstTsBefore, firstTsAfter: firstTsBefore, reason: 'already_covered' };
+  }
+
+  let currentFirst = firstTsBefore;
+  let consecutiveNoProgress = 0;
+  let attempts = 0;
+
+  for (let i = 0; i < maxAttempts; i++) {
+    attempts++;
+    const pane = await readPaneRect();
+    if (!pane) {
+      return { loaded: false, attempts, firstTsBefore, firstTsAfter: currentFirst, reason: 'no_canvas' };
+    }
+    const cx = (pane.x + pane.w / 2) * pane.dpr;
+    const cy = (pane.y + pane.h / 2) * pane.dpr;
+
+    for (let w = 0; w < wheelsPerAttempt; w++) {
+      await client.Input.dispatchMouseEvent({
+        type: 'mouseWheel', x: cx, y: cy,
+        deltaX: -120, deltaY: 0, button: 'none',
+      });
+      await new Promise(r => setTimeout(r, 25));
+    }
+    await new Promise(r => setTimeout(r, settleMs));
+
+    const newFirst = await readFirstTs();
+    if (newFirst === null) {
+      return { loaded: false, attempts, firstTsBefore, firstTsAfter: currentFirst, reason: 'data_unreadable' };
+    }
+    if (newFirst >= currentFirst) {
+      consecutiveNoProgress++;
+      if (consecutiveNoProgress >= 2) {
+        return {
+          loaded: newFirst <= targetSec, attempts,
+          firstTsBefore, firstTsAfter: newFirst,
+          reason: 'no_more_history',
+        };
+      }
+    } else {
+      consecutiveNoProgress = 0;
+    }
+    currentFirst = newFirst;
+    if (currentFirst <= targetSec) {
+      return { loaded: true, attempts, firstTsBefore, firstTsAfter: currentFirst, reason: 'reached_target' };
+    }
+  }
+
+  return {
+    loaded: currentFirst <= targetSec, attempts,
+    firstTsBefore, firstTsAfter: currentFirst,
+    reason: 'max_attempts',
+  };
+}
+
+export async function start({ date, scrollBack, _deps } = {}) {
   const { evaluate, getReplayApi } = _resolve(_deps);
   const rp = await getReplayApi();
   const available = await evaluate(wv(`${rp}.isReplayAvailable()`));
@@ -76,6 +208,15 @@ export async function start({ date, _deps } = {}) {
     // Cold start (or re-call without a date) — just nuke any cached state
     // so a "Continue your last replay?" dialog doesn't fight us.
     await evaluate(CLEAR_SESSION_STATE_JS);
+  }
+
+  // Pre-extend the bar buffer if requested. Must happen BEFORE
+  // showReplayToolbar — once replay is engaged, the data feed freezes
+  // and backward scrolls no longer trigger historical loads. See
+  // _scrollBackToTarget for mechanism details.
+  let scrollBackInfo = null;
+  if (scrollBack && ts !== null) {
+    scrollBackInfo = await _scrollBackToTarget(ts, _deps);
   }
 
   await evaluate(`${rp}.showReplayToolbar()`);
@@ -155,6 +296,7 @@ export async function start({ date, _deps } = {}) {
     requested_ts: ts ? Math.floor(ts / 1000) : null,
     drift_seconds: driftSeconds,
     warning,
+    scroll_back: scrollBackInfo,
   };
 }
 

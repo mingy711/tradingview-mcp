@@ -373,15 +373,28 @@ describe('core/pine.js — smoke', () => {
     );
   });
 
-  // ── B.17 switchScript ─────────────────────────────────────────────
+  // ── B.17 switchScript (Ctrl+O picker path) ────────────────────────
+  // Call sequence:
+  //  1. ensurePineEditorOpen → PINE_EDITOR_DIALOG_PRESENT
+  //  2. ensurePineEditorOpen → MONACO_PINE_EDITOR_AVAILABLE
+  //  3. currentBefore (title button text)
+  //  --- if short-circuit, return here ---
+  //  4. dispatch Escape×2 (clear menus, returns undefined)
+  //  5. focus textarea (returns undefined)
+  //  6. Ctrl+O keydown/press/up (returns undefined)
+  //  7. poll for picker dialog → true/false
+  //  8. set search input value (returns undefined)
+  //  9. find + click matching row → { ok: true, matched_via: 'exact_title'|'prefix' } or { error }
+  // 10..N. poll for title-button text to match (early-exit when match)
+  //  N+1. close dialog (returns undefined)
   it('test_switchScript_smoke_short_circuits_when_already_active', async () => {
     let evalIdx = 0;
     installCdpMocks({
-      // Calls: 1=ensurePineEditorOpen, 2=current name match
       evaluate: async () => {
         evalIdx++;
-        if (evalIdx === 1) return true;
-        return 'My Strategy';
+        if (evalIdx === 1) return true;       // PINE_EDITOR_DIALOG_PRESENT
+        if (evalIdx === 2) return true;       // MONACO_PINE_EDITOR_AVAILABLE
+        return 'My Strategy';                  // current name (matches)
       },
     });
     const r = await pine.switchScript({ name: 'My Strategy' });
@@ -390,19 +403,71 @@ describe('core/pine.js — smoke', () => {
     assert.equal(r.current, 'My Strategy');
   });
 
-  it('test_switchScript_smoke_throws_when_dropdown_missing', async () => {
+  it('test_switchScript_smoke_throws_when_picker_does_not_open', async () => {
     let evalIdx = 0;
     installCdpMocks({
       evaluate: async () => {
         evalIdx++;
-        if (evalIdx === 1) return true;          // ensurePineEditorOpen
-        if (evalIdx === 2) return 'Different';   // current name (not target)
-        return false;                            // dropdownOpened
+        if (evalIdx === 1) return true;          // PINE_EDITOR_DIALOG_PRESENT
+        if (evalIdx === 2) return true;          // MONACO_PINE_EDITOR_AVAILABLE
+        if (evalIdx === 3) return 'Different';   // currentBefore (not target)
+        if (evalIdx === 4) return undefined;     // Escape clear
+        if (evalIdx === 5) return undefined;     // focus textarea
+        if (evalIdx === 6) return undefined;     // Ctrl+O dispatch
+        if (evalIdx === 7) return false;         // poll for dialog → timeout
+        return undefined;
       },
     });
     await assert.rejects(
       pine.switchScript({ name: 'My Strategy' }),
-      /nameButton dropdown/,
+      /picker dialog did not appear/,
+    );
+  });
+
+  it('test_switchScript_smoke_completes_via_react_onclick', async () => {
+    let evalIdx = 0;
+    installCdpMocks({
+      evaluate: async () => {
+        evalIdx++;
+        if (evalIdx === 1) return true;          // PINE_EDITOR_DIALOG_PRESENT
+        if (evalIdx === 2) return true;          // MONACO_PINE_EDITOR_AVAILABLE
+        if (evalIdx === 3) return 'Different';   // currentBefore
+        if (evalIdx === 4) return undefined;     // Escape clear
+        if (evalIdx === 5) return undefined;     // focus textarea
+        if (evalIdx === 6) return undefined;     // Ctrl+O dispatch
+        if (evalIdx === 7) return true;          // picker dialog appears
+        if (evalIdx === 8) return undefined;     // set search input
+        if (evalIdx === 9) return { ok: true, matched_via: 'exact_title' };  // React onClick
+        if (evalIdx === 10) return 'My Strategy'; // title-button after click (matches on first poll)
+        return undefined;                         // dialog close
+      },
+    });
+    const r = await pine.switchScript({ name: 'My Strategy' });
+    assert.equal(r.success, true);
+    assert.equal(r.current, 'My Strategy');
+    assert.equal(r.matched_via, 'exact_title');
+  });
+
+  it('test_switchScript_smoke_throws_when_script_not_in_picker', async () => {
+    let evalIdx = 0;
+    installCdpMocks({
+      evaluate: async () => {
+        evalIdx++;
+        if (evalIdx === 1) return true;          // PINE_EDITOR_DIALOG_PRESENT
+        if (evalIdx === 2) return true;          // MONACO_PINE_EDITOR_AVAILABLE
+        if (evalIdx === 3) return 'Different';   // currentBefore
+        if (evalIdx === 4) return undefined;     // Escape clear
+        if (evalIdx === 5) return undefined;     // focus textarea
+        if (evalIdx === 6) return undefined;     // Ctrl+O dispatch
+        if (evalIdx === 7) return true;          // picker dialog appears
+        if (evalIdx === 8) return undefined;     // set search input
+        if (evalIdx === 9) return { error: 'no_match', searched: 'Missing', results: ['Foo', 'Bar'] };
+        return undefined;                         // dialog close
+      },
+    });
+    await assert.rejects(
+      pine.switchScript({ name: 'Missing' }),
+      /not found in picker.*Foo, Bar/,
     );
   });
 });

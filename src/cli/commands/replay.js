@@ -8,8 +8,9 @@ register('replay', {
       description: 'Start replay mode (clears stale session state before jumping)',
       options: {
         date: { type: 'string', short: 'd', description: 'Replay target. YYYY-MM-DD = midnight UTC. For intraday: YYYY-MM-DDTHH:MM:SS+HH:MM (e.g., 2026-05-08T09:33:00-04:00 for 09:33 ET) or YYYY-MM-DDTHH:MM:SSZ' },
+        'scroll-back': { type: 'boolean', description: 'Pre-scroll the chart backward to force TV to load historical bars covering the target date. Required for backward jumps outside the current bar buffer (TV silently clamps otherwise).' },
       },
-      handler: (opts) => core.start({ date: opts.date }),
+      handler: (opts) => core.start({ date: opts.date, scrollBack: opts['scroll-back'] }),
     }],
     ['step', {
       description: 'Advance one bar in replay',

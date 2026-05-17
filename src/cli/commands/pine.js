@@ -84,10 +84,21 @@ register('pine', {
       },
     }],
     ['open', {
-      description: 'Open a saved Pine Script by name',
+      description: 'Open a saved Pine Script by name (or --id USER;hash)',
+      options: {
+        id: { type: 'string', description: 'Script ID (USER;hash) from pine list — bypasses name lookup' },
+      },
       handler: (opts, positionals) => {
-        if (!positionals[0]) throw new Error('Script name required. Usage: tv pine open "My Script"');
+        if (opts.id) return core.openScript({ id: opts.id });
+        if (!positionals[0]) throw new Error('Script name required. Usage: tv pine open "My Script" OR tv pine open --id USER;hash');
         return core.openScript({ name: positionals.join(' ') });
+      },
+    }],
+    ['switch', {
+      description: 'Switch the Pine editor to a different saved script via the title-button dropdown (UI path). Unlike pine open which fetches source from pine-facade, this navigates the editor itself to the saved script.',
+      handler: (opts, positionals) => {
+        if (!positionals[0]) throw new Error('Script name required. Usage: tv pine switch "My Script"');
+        return core.switchScript({ name: positionals.join(' ') });
       },
     }],
     ['list', {

@@ -73,7 +73,7 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_switch_script', 'Switch the Pine editor to a different saved script using the UI dropdown. Properly switches editor context (unlike pine_open which only sets the source).', {
+  server.tool('pine_switch_script', 'Switch the Pine editor to a different saved script via the Ctrl+O picker. Properly switches editor context (title button + script binding) — unlike pine_open which only rewrites the source via Monaco.', {
     name: z.string().describe('Name of the script to switch to'),
   }, async ({ name }) => {
     try { return jsonResult(await core.switchScript({ name })); }
