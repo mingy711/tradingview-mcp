@@ -9,12 +9,15 @@ register('tab', {
       handler: () => core.list(),
     }],
     ['new', {
-      description: 'Open a new chart tab',
+      description: 'Open a new chart tab (lands on layout picker — pick layout in TV to complete)',
       handler: () => core.newTab(),
     }],
     ['close', {
-      description: 'Close the current tab',
-      handler: () => core.closeTab(),
+      description: 'Close a tab via CDP. Defaults to current attached tab; pass --id to target a specific tab.',
+      options: {
+        id: { type: 'string', description: 'CDP target id of the tab to close (from tab list or tab new picker_tab_id)' },
+      },
+      handler: (opts) => core.closeTab({ id: opts.id }),
     }],
     ['switch', {
       description: 'Switch to a tab by index',

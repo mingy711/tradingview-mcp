@@ -10,13 +10,15 @@ export function registerTabTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('tab_new', 'Open a new chart tab', {}, async () => {
+  server.tool('tab_new', 'Open a new chart tab by triggering the tab-strip "+" button via React onClick. The new tab lands on TV\'s layout-picker page (URL stays empty until a layout is chosen). Returns picker_tab_id so callers can switch into it OR clean it up via tab_close({ id }). Selecting a layout still requires user action in TV.', {}, async () => {
     try { return jsonResult(await core.newTab()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('tab_close', 'Close the current chart tab', {}, async () => {
-    try { return jsonResult(await core.closeTab()); }
+  server.tool('tab_close', 'Close a chart tab (or picker tab) via CDP. Defaults to the tab the MCP client is currently attached to; pass id to close a specific tab (e.g., a picker_tab_id from tab_new). Refuses to close the last chart tab.', {
+    id: z.string().optional().describe('CDP target ID of the tab to close. Omit to close the currently-attached tab.'),
+  }, async ({ id }) => {
+    try { return jsonResult(await core.closeTab({ id })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

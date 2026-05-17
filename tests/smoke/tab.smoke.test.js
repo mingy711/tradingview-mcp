@@ -1,8 +1,7 @@
 /**
- * Smoke tests — src/core/tab.js::list.
- * newTab/closeTab/switchTab flagged: they dispatch real keyboard events
- * and hit http://localhost:9222/json/*, which needs more than a 10-line
- * mock. They belong in a real integration test, not a smoke test.
+ * Smoke tests — src/core/tab.js::list/newTab/closeTab.
+ * switchTab still flagged for integration (it spawns CDP connections in
+ * a way the simple mocks don't model).
  */
 import { describe, it, afterEach, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -91,6 +90,119 @@ describe('core/tab.js — smoke', () => {
       tab.switchTabByName({}),
       /name \(string\) is required/i,
     );
+  });
+
+  it('test_newTab_smoke_opens_picker', async () => {
+    // newTab: triggers + via React onClick in a shell page, then diffs
+    // /json/list to find the new picker target. Mock the shell page + the
+    // before/after fetch responses to simulate a successful click.
+    const beforeIds = ['existing-chart-1', 'shell-1'];
+    const newPickerId = 'new-picker-99';
+    let callIdx = 0;
+    globalThis.fetch = async (url) => {
+      callIdx++;
+      if (url.endsWith('/json/list')) {
+        // First call: snapshot before trigger
+        if (callIdx === 1) return { json: async () => [
+          { id: 'shell-1', type: 'page', url: 'file:///app/index.html' },
+          { id: 'existing-chart-1', type: 'page', url: 'https://www.tradingview.com/chart/abc/' },
+        ]};
+        // Subsequent calls: snapshot after — picker has appeared
+        return { json: async () => [
+          { id: 'shell-1', type: 'page', url: 'file:///app/index.html' },
+          { id: 'existing-chart-1', type: 'page', url: 'https://www.tradingview.com/chart/abc/' },
+          { id: newPickerId, type: 'page', url: 'file:///app/new-tab/index.html?foo=bar', title: 'picker' },
+        ]};
+      }
+      return { json: async () => [] };
+    };
+    const fakeCdp = async () => ({
+      Runtime: {
+        evaluate: async () => ({ result: { value: { invoked: true } } }),
+      },
+      close: async () => {},
+    });
+    const r = await tab.newTab({ _deps: { cdpFactory: fakeCdp } });
+    assert.equal(r.success, true);
+    assert.equal(r.action, 'picker_tab_opened');
+    assert.equal(r.picker_tab_id, newPickerId);
+    assert.ok(r.hint.includes('layout picker'));
+  });
+
+  it('test_newTab_smoke_returns_failure_when_shell_not_found', async () => {
+    globalThis.fetch = async () => ({ json: async () => [
+      // Only chart pages — no Electron shell page exists
+      { id: 'c1', type: 'page', url: 'https://www.tradingview.com/chart/abc/' },
+    ]});
+    const r = await tab.newTab({ _deps: { cdpFactory: async () => ({ close: async () => {} }) } });
+    assert.equal(r.success, false);
+    assert.equal(r.action, 'no_shell_found');
+  });
+
+  it('test_closeTab_smoke_closes_by_id', async () => {
+    let closeCalls = [];
+    globalThis.fetch = async (url) => {
+      if (url.endsWith('/json/list')) return { json: async () => [
+        { id: 'pick-1', type: 'page', title: 'picker', url: 'file:///app/new-tab/index.html' },
+        { id: 'c1', type: 'page', title: 'Chart', url: 'https://www.tradingview.com/chart/abc/' },
+        { id: 'c2', type: 'page', title: 'Chart', url: 'https://www.tradingview.com/chart/xyz/' },
+      ]};
+      if (url.includes('/json/close/')) {
+        closeCalls.push(url);
+        return { status: 200, text: async () => 'Target is closing' };
+      }
+      return { json: async () => [] };
+    };
+    const r = await tab.closeTab({ id: 'pick-1' });
+    assert.equal(r.success, true);
+    assert.equal(r.action, 'tab_closed');
+    assert.equal(r.closed_id, 'pick-1');
+    assert.equal(closeCalls.length, 1);
+    assert.ok(closeCalls[0].endsWith('/json/close/pick-1'));
+  });
+
+  it('test_closeTab_smoke_refuses_last_chart_tab', async () => {
+    globalThis.fetch = async (url) => {
+      if (url.endsWith('/json/list')) return { json: async () => [
+        { id: 'c1', type: 'page', url: 'https://www.tradingview.com/chart/abc/' },
+      ]};
+      return { json: async () => [] };
+    };
+    await assert.rejects(
+      tab.closeTab({ id: 'c1' }),
+      /last chart tab/i,
+    );
+  });
+
+  it('test_closeTab_smoke_allows_closing_picker_when_only_one_chart_left', async () => {
+    // Edge case: closing a picker should NEVER trip the "last chart tab"
+    // check, because the picker isn't a chart tab.
+    globalThis.fetch = async (url) => {
+      if (url.endsWith('/json/list')) return { json: async () => [
+        { id: 'pick-1', type: 'page', title: 'picker', url: 'file:///app/new-tab/index.html' },
+        { id: 'c1', type: 'page', title: 'Chart', url: 'https://www.tradingview.com/chart/abc/' },
+      ]};
+      if (url.includes('/json/close/')) return { status: 200, text: async () => 'ok' };
+      return { json: async () => [] };
+    };
+    const r = await tab.closeTab({ id: 'pick-1' });
+    assert.equal(r.success, true);
+  });
+
+  it('test_closeTab_smoke_uses_current_target_when_id_omitted', async () => {
+    globalThis.fetch = async (url) => {
+      if (url.endsWith('/json/list')) return { json: async () => [
+        { id: 'current-target', type: 'page', title: 'Chart', url: 'https://www.tradingview.com/chart/abc/' },
+        { id: 'c2', type: 'page', title: 'Chart', url: 'https://www.tradingview.com/chart/xyz/' },
+      ]};
+      if (url.includes('/json/close/')) return { status: 200, text: async () => 'ok' };
+      return { json: async () => [] };
+    };
+    const r = await tab.closeTab({
+      _deps: { getTargetInfo: async () => ({ id: 'current-target' }) },
+    });
+    assert.equal(r.success, true);
+    assert.equal(r.closed_id, 'current-target');
   });
 
   // Regression: a single hung target's CDP connection used to stall the whole

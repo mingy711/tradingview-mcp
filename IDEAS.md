@@ -54,6 +54,20 @@ below. Each one blocked work in this session — listed in rough priority order.
 
 ### Shipped 2026-05-17
 
+- **`tab_new` + `tab_close` rewrite** — `tab_new` was unreliable on TV 3.1+
+  because the chart canvas absorbs `Ctrl+T` before Electron's window handler
+  sees it. Investigation found that the tab-strip `+` button lives in a
+  separate Electron shell page (file:///.../index.html) as
+  `button.create-new-tab-button`; triggering its React `onClick` handler
+  directly (via `__reactProps`) reliably spawns a new tab. The new tab
+  lands on TV's layout-picker page (URL `.../new-tab/index.html?...`) and
+  needs a layout selection to become a real chart. `tab_new` now returns
+  `picker_tab_id` so callers can switch into it or clean up. `tab_close`
+  rewritten to use CDP `/json/close/<id>` (Ctrl+W had the same user-gesture
+  problem); accepts an optional `id` param so callers can target picker
+  tabs explicitly, defaults to the currently-attached target. Refuses to
+  close the last chart tab. Layout selection in the picker still requires
+  user action in TV (no programmatic path discovered).
 - **`chart_set_symbol` recovery cascade** — three-tier auto-recovery now lives
   in `setSymbol`: poll `chart.symbol()` for JS-API match (8s window, replaces
   the old DOM-legend gate that false-positived on exchange-prefix mismatch);
@@ -132,13 +146,10 @@ below. Each one blocked work in this session — listed in rough priority order.
   chart-id at command time. Investigate whether `switchTab`'s
   `connectToTarget` is racing with the cached CDP client.
 
-- **`tv tab new` (Ctrl+T via `Input.dispatchKeyEvent`) doesn't reliably
-  create a new tab.** Returns `{action: "new_tab_opened"}` but tab_count is
-  unchanged. Keystroke likely gets eaten by the chart canvas (the wiki
-  entry on TV 3.1 notes `Ctrl+V` is captured by canvas before reaching
-  focused inputs). Either click the visible "+" button in the tab-strip,
-  or document that `tv tab new` is unreliable on TV 3.1.0+ and recommend
-  manual.
+- ~~**`tv tab new` (Ctrl+T via `Input.dispatchKeyEvent`) doesn't reliably
+  create a new tab.**~~ — Shipped 2026-05-17. Fixed by triggering the
+  Electron shell's `.create-new-tab-button` React `onClick` directly;
+  returns the picker tab id. Layout selection still manual.
 
 ### Indicators / Pine
 

@@ -3,7 +3,7 @@
  * Controls TradingView Desktop tabs via CDP and Electron keyboard shortcuts.
  */
 import CDP from 'chrome-remote-interface';
-import { getClient, connectToTarget } from '../connection.js';
+import { getClient, connectToTarget, getTargetInfo } from '../connection.js';
 
 const CDP_HOST = process.env.TV_CDP_HOST || 'localhost';
 const CDP_PORT = Number(process.env.TV_CDP_PORT) || 9222;
@@ -97,58 +97,168 @@ export async function list({ include_pine_script = true, _deps } = {}) {
 }
 
 /**
- * Open a new chart tab via keyboard shortcut (Ctrl+T / Cmd+T).
+ * Open a new chart tab by invoking the tab-strip `+` button's React onClick
+ * handler in TV Desktop's Electron shell page.
+ *
+ * Background: Ctrl+T via `Input.dispatchKeyEvent` doesn't work — the chart
+ * canvas captures the keystroke before the Electron window sees it. The `+`
+ * button lives in a separate Electron shell page (file:///.../index.html)
+ * with class `.create-new-tab-button`. DOM `.click()` and CDP
+ * `Input.dispatchMouseEvent` don't fire its handler, but reaching through
+ * React's `__reactProps` key and calling `onClick` directly DOES work —
+ * the handler delegates to `getWindowControl().createAndAddTab({})`.
+ *
+ * The new tab opens on TV's layout-picker page (NOT a real chart yet). It
+ * stays as an empty-URL CDP target until the user picks a saved layout in
+ * TV (or until we add a programmatic layout-selection step). We return the
+ * picker tab's ID so callers can switch to it or clean it up later via
+ * `tab_close({ id })`.
+ *
+ * @returns {Promise<object>} { success, picker_tab_id, new_target, hint }
  */
-export async function newTab() {
-  const c = await getClient();
+async function _findShellPagesAndTrigger(cdpFactory) {
+  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  const targets = await resp.json();
+  const shells = targets.filter(t => t.type === 'page' && /file:\/\/.*index\.html/i.test(t.url));
+  for (const shell of shells) {
+    let c;
+    try {
+      c = await cdpFactory({ host: CDP_HOST, port: CDP_PORT, target: shell.id });
+      const { result } = await c.Runtime.evaluate({
+        expression: `
+          (function() {
+            var btn = document.querySelector('.create-new-tab-button');
+            if (!btn || btn.offsetParent === null) return { no_btn: true };
+            var key = Object.keys(btn).find(function(k) { return k.indexOf('__reactProps') === 0; });
+            if (!key) return { no_react_key: true };
+            var props = btn[key];
+            if (!props || typeof props.onClick !== 'function') return { no_onclick: true };
+            try {
+              props.onClick({
+                preventDefault: function(){}, stopPropagation: function(){},
+                currentTarget: btn, target: btn, type: 'click', button: 0,
+              });
+              return { invoked: true };
+            } catch(e) { return { call_err: e.message }; }
+          })()
+        `,
+        returnByValue: true,
+      });
+      if (result?.value?.invoked) return { ok: true, shell_id: shell.id };
+    } catch { /* try next shell */ }
+    finally { if (c) try { await c.close(); } catch {} }
+  }
+  return { ok: false };
+}
 
-  // Electron/TradingView Desktop uses Ctrl+T for new tab on macOS too
-  // But some versions use Cmd+T
-  const isMac = process.platform === 'darwin';
-  const mod = isMac ? 4 : 2; // 4 = meta (Cmd), 2 = ctrl
+export async function newTab({ _deps } = {}) {
+  const cdpFactory = _deps?.cdpFactory || CDP;
+  const fetchFn = _deps?.fetch || globalThis.fetch;
 
-  await c.Input.dispatchKeyEvent({
-    type: 'keyDown',
-    modifiers: mod,
-    key: 't',
-    code: 'KeyT',
-    windowsVirtualKeyCode: 84,
-  });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 't', code: 'KeyT' });
+  // Snapshot CDP targets so we can identify the newly-opened tab via diff.
+  // Include ALL pages (not just chart tabs) because the new tab starts with
+  // an empty URL until TV's layout picker loads.
+  const respBefore = await fetchFn(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  const beforeAll = await respBefore.json();
+  const beforeIds = new Set(beforeAll.filter(t => t.type === 'page').map(t => t.id));
 
-  await new Promise(r => setTimeout(r, 2000));
+  const trig = await _findShellPagesAndTrigger(cdpFactory);
+  if (!trig.ok) {
+    return {
+      success: false,
+      action: 'no_shell_found',
+      hint: 'Could not find a TV Desktop Electron shell page with the .create-new-tab-button. Either TV is not running or its UI has changed; open a new tab manually in TV.',
+    };
+  }
 
-  // Verify a new tab appeared
-  const state = await list();
-  return { success: true, action: 'new_tab_opened', ...state };
+  // Poll for the new tab. TV typically registers the picker page within
+  // ~1 s; cap at 5 s for slow boxes.
+  let newTarget = null;
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 300));
+    const respAfter = await fetchFn(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+    const afterAll = await respAfter.json();
+    const fresh = afterAll.filter(t => t.type === 'page' && !beforeIds.has(t.id));
+    if (fresh.length > 0) {
+      // Prefer empty-URL (picker) over chart pages — the picker is what +
+      // produces; any chart page that snuck in was created by something else.
+      newTarget = fresh.find(t => !t.url) || fresh[0];
+      break;
+    }
+  }
+
+  if (!newTarget) {
+    return {
+      success: false,
+      action: 'triggered_but_no_new_tab',
+      hint: 'Triggered the + button via React but no new tab appeared within 5s. May indicate Electron sandbox restrictions; open a new tab manually in TV.',
+    };
+  }
+
+  return {
+    success: true,
+    action: 'picker_tab_opened',
+    picker_tab_id: newTarget.id,
+    new_target: { id: newTarget.id, url: newTarget.url || '', title: newTarget.title || '' },
+    hint: 'New tab is on TV\'s layout picker. To complete: pick a layout in TV manually, OR call tab_close with this picker_tab_id to discard. tab_list will show the tab once a layout is chosen and the URL becomes /chart/<id>/.',
+  };
 }
 
 /**
- * Close the current tab via keyboard shortcut (Ctrl+W / Cmd+W).
+ * Close a tab via CDP's `/json/close/<id>` HTTP endpoint. This works
+ * for any page target, including the empty-URL picker tabs that
+ * `tab_new` leaves behind when the user hasn't picked a layout. The
+ * Ctrl+W keyboard shortcut (previous implementation) has the same
+ * Electron user-gesture problem Ctrl+T does and proved unreliable.
+ *
+ * @param {object} opts
+ * @param {string} [opts.id] - target ID to close. If omitted, closes the
+ *   tab the MCP client is currently attached to (via getTargetInfo).
  */
-export async function closeTab() {
-  const before = await list();
-  if (before.tab_count <= 1) {
-    throw new Error('Cannot close the last tab. Use tv_launch to restart TradingView instead.');
+export async function closeTab({ id, _deps } = {}) {
+  const fetchFn = _deps?.fetch || globalThis.fetch;
+  const targetInfoFn = _deps?.getTargetInfo || getTargetInfo;
+
+  let targetId = id;
+  if (!targetId) {
+    // Default: close whatever tab the MCP client is attached to.
+    const info = await targetInfoFn();
+    targetId = info?.id;
+    if (!targetId) throw new Error('No tab id provided and no current CDP target attached.');
   }
 
-  const c = await getClient();
-  const isMac = process.platform === 'darwin';
-  const mod = isMac ? 4 : 2;
+  // Don't close the last chart tab — leaves the user with nothing visible.
+  // Picker tabs (empty URL) don't count for this check; closing them is the
+  // intended cleanup path.
+  const respAll = await fetchFn(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  const all = await respAll.json();
+  const chartTabs = all.filter(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
+  const target = all.find(t => t.id === targetId);
+  if (!target) {
+    throw new Error(`No CDP target found with id ${targetId}. It may already be closed.`);
+  }
+  const targetIsChart = target.url && /tradingview\.com\/chart/i.test(target.url);
+  if (targetIsChart && chartTabs.length <= 1) {
+    throw new Error('Cannot close the last chart tab. Use tv_launch to restart TradingView instead.');
+  }
 
-  await c.Input.dispatchKeyEvent({
-    type: 'keyDown',
-    modifiers: mod,
-    key: 'w',
-    code: 'KeyW',
-    windowsVirtualKeyCode: 87,
-  });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'w', code: 'KeyW' });
+  const closeResp = await fetchFn(`http://${CDP_HOST}:${CDP_PORT}/json/close/${targetId}`);
+  const closeBody = closeResp && closeResp.text ? await closeResp.text() : '';
+  if (closeResp && closeResp.status && closeResp.status >= 400) {
+    throw new Error(`CDP close failed (${closeResp.status}): ${closeBody}`);
+  }
 
-  await new Promise(r => setTimeout(r, 1000));
-
-  const after = await list();
-  return { success: true, action: 'tab_closed', tabs_before: before.tab_count, tabs_after: after.tab_count };
+  // Re-list to report post-close state.
+  await new Promise(r => setTimeout(r, 500));
+  const after = await list({ include_pine_script: false });
+  return {
+    success: true,
+    action: 'tab_closed',
+    closed_id: targetId,
+    closed_url: target.url || '',
+    chart_tabs_remaining: after.tab_count,
+  };
 }
 
 /**
