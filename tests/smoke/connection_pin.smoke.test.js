@@ -51,4 +51,16 @@ describe('connection.js — pin + filter (smoke)', () => {
     c.clearPin();
     assert.equal(c.getPin(), null);
   });
+
+  it('CDP_HOST defaults to 127.0.0.1 (not localhost) to avoid IPv6 resolution path', async () => {
+    delete process.env.TV_CDP_HOST;
+    const c = await freshImport();
+    assert.equal(c.CDP_HOST, '127.0.0.1');
+  });
+
+  it('CDP_HOST honors TV_CDP_HOST env override', async () => {
+    const c = await freshImport({ TV_CDP_HOST: 'remote.docker.internal' });
+    assert.equal(c.CDP_HOST, 'remote.docker.internal');
+    delete process.env.TV_CDP_HOST;
+  });
 });

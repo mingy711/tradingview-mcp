@@ -457,10 +457,26 @@ export async function getVisibleRange({ _deps } = {}) {
   return { success: true, visible_range: result.visible_range, bars_range: result.bars_range };
 }
 
-export async function setVisibleRange({ from, to, _deps }) {
-  const { evaluate } = _resolve(_deps);
-  const f = requireFinite(from, 'from');
-  const t = requireFinite(to, 'to');
+// Internal: read the chart's currently displayed visible range as
+// { from, to } in unix seconds. Returns { from: 0, to: 0, error? } on
+// failure rather than throwing — callers compare against the request to
+// detect cache-clamp.
+async function _readVisibleRange(evaluate) {
+  return await evaluate(`
+    (function() {
+      var chart = ${CHART_API};
+      try { var r = chart.getVisibleRange(); return { from: r.from || 0, to: r.to || 0 }; }
+      catch(e) { return { from: 0, to: 0, error: e.message }; }
+    })()
+  `);
+}
+
+// Internal: zoom the main-series time scale to the bars covering
+// [from, to] in unix seconds. Walks the loaded bar buffer and calls
+// zoomToBarsRange(firstIdx, lastIdx); when the requested window predates
+// the buffer, both indices clamp to the buffer's start — that's the
+// silent-clamp condition setVisibleRange's auto_extend_cache fixes.
+async function _zoomTimeRange(evaluate, from, to) {
   await evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -472,21 +488,122 @@ export async function setVisibleRange({ from, to, _deps }) {
       var fromIdx = startIdx, toIdx = endIdx;
       for (var i = startIdx; i <= endIdx; i++) {
         var v = bars.valueAt(i);
-        if (v && v[0] >= ${f} && fromIdx === startIdx) fromIdx = i;
-        if (v && v[0] <= ${t}) toIdx = i;
+        if (v && v[0] >= ${from} && fromIdx === startIdx) fromIdx = i;
+        if (v && v[0] <= ${to}) toIdx = i;
       }
       ts.zoomToBarsRange(fromIdx, toIdx);
     })()
   `);
+}
+
+// Internal: force TV to load historical bars covering `fromUnixSec` by
+// briefly entering replay mode at that timestamp, then stopping. TV
+// preloads the replay buffer when selectDate fires; those bars stay in
+// the chart cache after stopReplay. Companion to the replay
+// `_scrollBackToTarget` mouseWheel helper — same problem domain, but
+// this path leaves replay state cleanly (no UI toolbar shown to user).
+//
+// Returns { extended: boolean, error?: string }.
+async function _extendCacheBackward(evaluate, fromUnixSec) {
+  try {
+    const replayAvailable = await evaluate(`
+      (function() {
+        try {
+          var rp = window.TradingViewApi && window.TradingViewApi._replayApi;
+          return !!rp;
+        } catch(e) { return false; }
+      })()
+    `);
+    if (!replayAvailable) return { extended: false, error: 'replay API not exposed' };
+
+    const wasStarted = await evaluate(`
+      (function() {
+        var rp = window.TradingViewApi._replayApi;
+        var st = rp.isReplayStarted();
+        return (st && typeof st.value === 'function') ? st.value() : !!st;
+      })()
+    `);
+    if (wasStarted) return { extended: false, error: 'replay already running, skipping cache preload' };
+
+    const ts = fromUnixSec * 1000;
+    await evaluate(`window.TradingViewApi._replayApi.showReplayToolbar()`);
+    await evaluate(`window.TradingViewApi._replayApi.selectDate(${ts}).then(function(){ return 'ok'; }).catch(function(){ return 'err'; })`);
+
+    // Poll for replay to start (preload completes around the same time) up to ~8s.
+    let started = false;
+    for (let i = 0; i < 32; i++) {
+      await new Promise(r => setTimeout(r, 250));
+      started = await evaluate(`
+        (function() {
+          var rp = window.TradingViewApi._replayApi;
+          var st = rp.isReplayStarted();
+          return (st && typeof st.value === 'function') ? st.value() : !!st;
+        })()
+      `);
+      if (started) break;
+    }
+    // Stop replay so the chart returns to live; bars remain in cache.
+    try { await evaluate(`window.TradingViewApi._replayApi.stopReplay()`); } catch { /* best-effort */ }
+    await new Promise(r => setTimeout(r, 600));
+    return { extended: !!started };
+  } catch (e) {
+    return { extended: false, error: e.message };
+  }
+}
+
+/**
+ * Set the chart's visible time range to [from, to] (unix seconds).
+ *
+ * When the requested `from` predates the loaded bar buffer, TV silently
+ * clamps the zoom to the buffer's start. `auto_extend_cache=true` (the
+ * default) detects this (actual.from > requested.from + 60s tolerance)
+ * and triggers `_extendCacheBackward` — a brief replay-mode entry that
+ * forces TV to preload bars covering `from`, after which the zoom is
+ * retried. Response carries `cache_extended` + final `clamped` so the
+ * caller can tell when the data layer ran out of history.
+ */
+export async function setVisibleRange({ from, to, auto_extend_cache = true, _deps }) {
+  const { evaluate } = _resolve(_deps);
+  const f = requireFinite(from, 'from');
+  const t = requireFinite(to, 'to');
+
+  await _zoomTimeRange(evaluate, f, t);
   await new Promise(r => setTimeout(r, 500));
-  const actual = await evaluate(`
-    (function() {
-      var chart = ${CHART_API};
-      try { var r = chart.getVisibleRange(); return { from: r.from || 0, to: r.to || 0 }; }
-      catch(e) { return { from: 0, to: 0, error: e.message }; }
-    })()
-  `);
-  return { success: true, requested: { from, to }, actual: actual || { from: 0, to: 0 } };
+  const actual = await _readVisibleRange(evaluate) || { from: 0, to: 0 };
+
+  // 60s tolerance: bar-snap quantization on intraday TFs lands the
+  // cursor on the bar containing `from`, which can be up to one bar
+  // earlier (we err on the side of "still inside the requested window").
+  const clamped = (actual.from || 0) > f + 60;
+  let cacheExtended = false;
+  let cacheNote = null;
+
+  if (clamped && auto_extend_cache) {
+    const ext = await _extendCacheBackward(evaluate, f);
+    cacheExtended = !!ext.extended;
+    cacheNote = ext.error || null;
+    if (cacheExtended) {
+      await _zoomTimeRange(evaluate, f, t);
+      await new Promise(r => setTimeout(r, 500));
+      const retry = await _readVisibleRange(evaluate) || { from: 0, to: 0 };
+      return {
+        success: true,
+        requested: { from, to },
+        actual: retry,
+        cache_extended: true,
+        clamped: (retry.from || 0) > f + 60,
+      };
+    }
+  }
+
+  return {
+    success: true,
+    requested: { from, to },
+    actual,
+    cache_extended: cacheExtended,
+    clamped,
+    cache_note: cacheNote,
+  };
 }
 
 export async function scrollToDate({ date, _deps } = {}) {
@@ -508,23 +625,7 @@ export async function scrollToDate({ date, _deps } = {}) {
   const from = timestamp - halfWindow;
   const to = timestamp + halfWindow;
 
-  await evaluate(`
-    (function() {
-      var chart = ${CHART_API};
-      var m = chart._chartWidget.model();
-      var ts = m.timeScale();
-      var bars = m.mainSeries().bars();
-      var startIdx = bars.firstIndex();
-      var endIdx = bars.lastIndex();
-      var fromIdx = startIdx, toIdx = endIdx;
-      for (var i = startIdx; i <= endIdx; i++) {
-        var v = bars.valueAt(i);
-        if (v && v[0] >= ${from} && fromIdx === startIdx) fromIdx = i;
-        if (v && v[0] <= ${to}) toIdx = i;
-      }
-      ts.zoomToBarsRange(fromIdx, toIdx);
-    })()
-  `);
+  await _zoomTimeRange(evaluate, from, to);
   await new Promise(r => setTimeout(r, 500));
   return { success: true, date, centered_on: timestamp, resolution, window: { from, to } };
 }

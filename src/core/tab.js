@@ -6,7 +6,8 @@ import CDP from 'chrome-remote-interface';
 import { getClient, connectToTarget, getTargetInfo, claimAndPin, releaseAndUnpin, getPin } from '../connection.js';
 import * as registry from './pin_registry.js';
 
-const CDP_HOST = process.env.TV_CDP_HOST || 'localhost';
+// See src/connection.js for why IPv4 is the safer default than 'localhost'.
+const CDP_HOST = process.env.TV_CDP_HOST || '127.0.0.1';
 const CDP_PORT = Number(process.env.TV_CDP_PORT) || 9222;
 
 // Per-target Pine read timeout. A single hung target (e.g., one that's

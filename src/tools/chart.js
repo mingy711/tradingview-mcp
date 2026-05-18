@@ -51,11 +51,12 @@ export function registerChartTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('chart_set_visible_range', 'Zoom the chart to a specific date range (unix timestamps)', {
+  server.tool('chart_set_visible_range', 'Zoom the chart to a specific date range (unix seconds). When `from` predates the loaded bar buffer, TV silently clamps the zoom; `auto_extend_cache=true` (default) detects the clamp and briefly enters replay mode at `from` to preload historical bars, then retries. Response carries `cache_extended` + final `clamped` flag.', {
     from: z.coerce.number().describe('Start of range (unix timestamp in seconds)'),
     to: z.coerce.number().describe('End of range (unix timestamp in seconds)'),
-  }, async ({ from, to }) => {
-    try { return jsonResult(await core.setVisibleRange({ from, to })); }
+    auto_extend_cache: z.boolean().optional().describe('Default true. When the requested range pre-dates the loaded bar buffer, auto-preload via brief replay-mode entry.'),
+  }, async ({ from, to, auto_extend_cache }) => {
+    try { return jsonResult(await core.setVisibleRange({ from, to, auto_extend_cache })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

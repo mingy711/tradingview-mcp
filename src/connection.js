@@ -3,7 +3,12 @@ import { claim as _registryClaim, release as _registryRelease, releaseAllSync as
 
 let client = null;
 let targetInfo = null;
-const CDP_HOST = process.env.TV_CDP_HOST || 'localhost';
+// 127.0.0.1, not 'localhost' — some Windows/WSL/Node setups resolve
+// 'localhost' to ::1 (IPv6) first, while Chrome's CDP listens only on
+// 0.0.0.0 (IPv4). The resulting ETIMEDOUT or ECONNREFUSED looks like a
+// missing port even though Chrome is running. Explicit IPv4 avoids it.
+// Override with TV_CDP_HOST when targeting a remote / container CDP.
+const CDP_HOST = process.env.TV_CDP_HOST || '127.0.0.1';
 const CDP_PORT = Number(process.env.TV_CDP_PORT) || 9222;
 const MAX_RETRIES = 5;
 const BASE_DELAY = 500;

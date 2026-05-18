@@ -64,6 +64,33 @@ Python-computed reference. **One session validated bit-exact** (2026-05-08
 NQM6, all 6 lines + OR OHLC match) but the 49-session scale-out hit the bugs
 below. Each one blocked work in this session — listed in rough priority order.
 
+### Shipped 2026-05-18 — Tier-A bug fixes + small wins
+
+- **CDP_HOST defaults to 127.0.0.1** (from sfbayman) — replaces
+  `localhost`. Some Windows/WSL/Node setups resolve `localhost` to
+  `::1` (IPv6) first while Chrome's CDP listens only on `0.0.0.0`
+  (IPv4); explicit IPv4 avoids the resulting ETIMEDOUT that looks
+  like a missing port. Override via `TV_CDP_HOST`.
+- **`indicator_set_inputs` display-name resolution** (from
+  jacktradesnq) — `{ Length: 21 }` now resolves the case-insensitive
+  display label to the underlying input id (e.g. `in_0`) when no
+  direct id match. Response surfaces `unmatched_keys` + full
+  `detected_inputs[]` (id, value, name, type, options) so the caller
+  can retry with the right key.
+- **`tv quote --route`** CLI flag — exposes the auto/rest/chart-switch
+  routing we already had in the MCP wrapper; pairs naturally with the
+  recently-shipped `screener_scan` so a caller can quote any returned
+  ticker without disturbing the chart.
+- **`chart_set_visible_range auto_extend_cache`** (from jacktradesnq)
+  — when the requested `from` predates the loaded bar buffer, TV
+  silently clamps the zoom. Default-on cache extension detects the
+  clamp (`actual.from > requested.from + 60s`), briefly enters replay
+  mode at `from` to force TV to preload bars, stops replay, retries
+  the zoom. Response carries `cache_extended` + final `clamped`. Same
+  mechanism family as the replay `--scroll-back` we shipped earlier,
+  but cleaner exit (no UI toolbar lingers). `scrollToDate` shares the
+  extracted `_zoomTimeRange` helper now.
+
 ### Shipped 2026-05-17 — Tier 2 fork audit ports
 
 - **`evaluateChecked`** (concept from valleyfresh, reimplemented) —

@@ -27,6 +27,39 @@ describe('core/indicators.js — smoke', () => {
     );
   });
 
+  it('test_setInputs_smoke_returns_unmatched_and_detected', async () => {
+    // Simulate the page-side response shape with the new fields.
+    installCdpMocks({
+      evaluate: async () => ({
+        updated_inputs: { in_0: 21 },
+        unmatched_keys: ['BogusKey'],
+        detected_inputs: [
+          { id: 'in_0', value: 21, name: 'Length', type: 'integer', options: null },
+          { id: 'in_1', value: 'close', name: 'Source', type: 'source', options: ['open', 'close'] },
+        ],
+      }),
+    });
+    const r = await indicators.setInputs({
+      entity_id: 'eFu1',
+      inputs: { Length: 21, BogusKey: 'x' },
+    });
+    assert.equal(r.success, true);
+    assert.deepEqual(r.updated_inputs, { in_0: 21 }, 'display-name resolved to id');
+    assert.deepEqual(r.unmatched_keys, ['BogusKey']);
+    assert.equal(r.detected_inputs.length, 2);
+    assert.equal(r.detected_inputs[0].name, 'Length');
+  });
+
+  it('test_setInputs_smoke_setInputValues_error_surfaces', async () => {
+    installCdpMocks({
+      evaluate: async () => ({ error: 'setInputValues failed: bad option value' }),
+    });
+    await assert.rejects(
+      indicators.setInputs({ entity_id: 'eFu1', inputs: { Length: -1 } }),
+      /setInputValues failed/,
+    );
+  });
+
   it('test_toggleVisibility_smoke', async () => {
     installCdpMocks({ evaluate: async () => ({ visible: false }) });
     const r = await indicators.toggleVisibility({ entity_id: 'eFu1', visible: false });

@@ -418,6 +418,81 @@ describe('core/chart.js — smoke', () => {
     assert.equal(r.success, true);
     assert.equal(r.requested.from, 100);
     assert.equal(r.actual.to, 200);
+    assert.equal(r.clamped, false);
+    assert.equal(r.cache_extended, false);
+  });
+
+  it('test_setVisibleRange_smoke_detects_clamp_no_auto_extend', async () => {
+    // Mock: _zoomTimeRange (undef) → _readVisibleRange returns a range
+    // starting AFTER the requested `from`, indicating TV clamped.
+    // With auto_extend_cache=false, we expect clamped:true, no retry.
+    const responses = [
+      undefined,                              // _zoomTimeRange
+      { from: 1700000000, to: 1700001000 },   // _readVisibleRange — clamped
+    ];
+    let i = 0;
+    const r = await chart.setVisibleRange({
+      from: 1690000000, to: 1700001000,
+      auto_extend_cache: false,
+      _deps: { evaluate: async () => responses[i++] },
+    });
+    assert.equal(r.success, true);
+    assert.equal(r.clamped, true);
+    assert.equal(r.cache_extended, false);
+  });
+
+  it('test_setVisibleRange_smoke_auto_extend_retries_after_preload', async () => {
+    // 1. _zoomTimeRange                       → undef
+    // 2. _readVisibleRange                    → clamped (from=1700000000)
+    // 3. _extendCacheBackward: replayAvailable → true
+    // 4. _extendCacheBackward: wasStarted      → false
+    // 5. showReplayToolbar                     → undef
+    // 6. selectDate                            → undef
+    // 7. poll isReplayStarted                  → true (first iteration)
+    // 8. stopReplay                            → undef
+    // 9. _zoomTimeRange retry                  → undef
+    // 10. _readVisibleRange retry              → unclamped (from=1690000000)
+    const responses = [
+      undefined,
+      { from: 1700000000, to: 1700001000 },
+      true,
+      false,
+      undefined,
+      undefined,
+      true,
+      undefined,
+      undefined,
+      { from: 1690000000, to: 1700001000 },
+    ];
+    let i = 0;
+    const r = await chart.setVisibleRange({
+      from: 1690000000, to: 1700001000,
+      _deps: { evaluate: async () => responses[i++] },
+    });
+    assert.equal(r.success, true);
+    assert.equal(r.cache_extended, true);
+    assert.equal(r.clamped, false, 'retry succeeded after preload');
+    assert.equal(r.actual.from, 1690000000);
+  });
+
+  it('test_setVisibleRange_smoke_auto_extend_replay_unavailable', async () => {
+    // 1. _zoomTimeRange                  → undef
+    // 2. _readVisibleRange               → clamped
+    // 3. _extendCacheBackward: replayAvailable → false (bail)
+    const responses = [
+      undefined,
+      { from: 1700000000, to: 1700001000 },
+      false,
+    ];
+    let i = 0;
+    const r = await chart.setVisibleRange({
+      from: 1690000000, to: 1700001000,
+      _deps: { evaluate: async () => responses[i++] },
+    });
+    assert.equal(r.success, true);
+    assert.equal(r.clamped, true);
+    assert.equal(r.cache_extended, false);
+    assert.match(r.cache_note, /replay API not exposed/);
   });
 
   it('test_scrollToDate_smoke_iso', async () => {

@@ -2,8 +2,14 @@ import { register } from '../router.js';
 import * as core from '../../core/data.js';
 
 register('quote', {
-  description: 'Get real-time price quote',
-  handler: (opts, positionals) => core.getQuote({ symbol: positionals[0] }),
+  description: 'Get real-time price quote. Pass a symbol to quote a non-active ticker (auto-routes through scanner REST or chart-switch).',
+  options: {
+    route: { type: 'string', short: 'r', description: 'auto (default — scanner REST then chart-switch), rest (US equities only), or chart-switch (universal, slower, includes bid/ask)' },
+  },
+  handler: (opts, positionals) => core.getQuote({
+    symbol: positionals[0],
+    route: opts.route === 'chart-switch' ? 'chart_switch' : opts.route,
+  }),
 });
 
 register('ohlcv', {
