@@ -34,7 +34,7 @@ const TITLE_REGEX = /(?:indicator|strategy)\s*\(\s*[\s\S]*?['"]([^'"]+)['"]/;
 export function deriveCleanMatch(source, pinePath) {
   const m = source.match(TITLE_REGEX);
   if (m) return m[1];
-  const base = String(pinePath || '').split(/[\/\\]/).pop() || '';
+  const base = String(pinePath || '').split(/[/\\]/).pop() || '';
   return base.replace(/\.pine$/i, '');
 }
 
