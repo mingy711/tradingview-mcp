@@ -7,6 +7,152 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-05-18
+
+Three weeks of fork-audit ports, TV Desktop 3.1.0.7818 hardening, and a
+correctness sweep that resolved 44 codesage findings across 19 core
+files. No breaking API changes.
+
+### Added
+
+- **Tier-1 fork-audit ports — 11 new MCP tools** across 6 feature
+  families (commit `611d357`):
+  - **News** (`news_get_ticker`, `news_get_signal_snapshot`) — Nasdaq +
+    Yahoo Finance RSS with keyword-based sentiment scoring; index/ETF
+    aliasing (SPX→SPY, NDX→QQQ, RUT→IWM).
+  - **Screener** (`screener_scan`, `tv screener scan`) — flexible
+    multi-market scanner over TV's public scanner endpoint with
+    asset-type presets (stock, etf, crypto, forex, futures, index),
+    exchange filter, ticker hydration, numeric range filters.
+  - **Strategy** (`strategy_set_deep_backtest_range`) — drive the Deep
+    Backtesting calendar picker programmatically; locale-tolerant
+    (English / French / "OK" / "Apply").
+  - **Pine deploy / publish** (`pine_deploy`, `pine_publish_dialog_inspect`)
+    — file-based atomic deploy (read → pre-clean → set source → save →
+    Add-to-chart with honest_success), and a read-only probe that
+    dumps the publish dialog's structure for selector discovery.
+  - **Tab pinning** (`tab_pin`, `tab_unpin`, `tab_registry_list`) — pin
+    a specific TV tab as the deterministic CDP target with a
+    cross-process registry at `~/.tv-mcp-registry.json` (lock + stale
+    PID reaping).
+- **Tier-2 ports** (commit `b0dc68b`):
+  - **`evaluateChecked` defensive CDP wrapper** that uses page-side
+    `JSON.stringify` + length checksum to defeat CDP's "Object
+    reference chain is too long" failure mode on heavy payloads.
+  - **Replay CLI ergonomics** — `parseFlexDate` accepts ISO,
+    8-digit (YYYYMMDD), 6-digit (YYMMDD), slash-form, month-name,
+    `today`, `yesterday`, and `-Nd` relative offsets.
+  - **`tv data shapes`** — first-class CLI subcommand for the existing
+    `data_get_pine_shapes` MCP tool.
+- **Tier-A small wins** (commit `e75ff13`):
+  - IPv4 host default (`127.0.0.1`) avoids `::1` mis-resolution that
+    burned 10–20s per CDP call on some Linux/Win boxes.
+  - `indicator_set_inputs` now matches by display name in addition to
+    the machine `id`, so `{ "Length": 21 }` works without first
+    grepping `metaInfo()` for `in_0`.
+  - `quote_get` honors the `symbol` param via chart-switch + restore.
+  - `chart_set_visible_range` auto-extends the bar cache backward by
+    briefly entering replay mode when the requested window predates
+    the loaded buffer.
+- **Pine workflow** (commits `27e16b9`, `8620f4e`, `141051d`):
+  - `pine_switch_script` via the Ctrl+O picker (TV 3.1+ where the
+    title button is a context menu, not a script list).
+  - `replay_scroll_back` — wheel-scroll history bars in BEFORE
+    engaging replay (the replay-on data feed freezes scrollback).
+  - `chart_manage_indicator` routes `USER;<scriptIdPart>` references
+    through the Pine editor for cleaner add+remove semantics.
+  - `pine_smart_compile` returns honest `study_added` by diffing
+    `getAllStudies()` before/after and verifying the new study's title.
+- **CLI** (commit `f693f68`):
+  - **`tv repl`** persistent CDP session for batch sweeps — keeps the
+    CDP connection alive across commands so a 50-symbol sweep doesn't
+    pay the connect cost per call.
+  - Leading-hyphen arg parsing (`tv replay -d -7d` no longer mangles
+    the negative date offset).
+  - `--include-empty` flag on data readers.
+- **Chart hygiene** (commits `aa0b45c`, `24d3c25`, `d31ace0`):
+  - `chart_get_state` surfaces inert Pine studies left over after a
+    hard reload so callers can clean them up.
+  - `chart_remove_studies_by_title` — bulk title-match removal.
+  - `data_get_strategy_info` reports the strategy name and the Strategy
+    Tester's active date range.
+- **Alerts via REST** (commits `4efbd1f`, `b5e9424`):
+  - `alert_create` and `alert_delete` rewritten to call the
+    `pricealerts.tradingview.com` REST endpoint (locale-proof, returns
+    real `alert_id`, supports bulk delete).
+  - `alert_create_indicator` posts a Pine `alertcondition()` alert
+    with `inputs` + `offsets_by_plot` schema, suitable for BUY/SELL
+    signal webhooks.
+- **Data** (commits `3f52d3f`, `92b6b3e`, `0c26000`):
+  - `quote_get` scanner-REST fast path with `route` flag (`auto` /
+    `rest` / `chart_switch`).
+  - `data_get_pine_labels` exposes `bar_time`, `signal_price`, and
+    `since`/`until` filtering.
+
+### Changed
+
+- **CDP reliability layer** (commit `cc57300`):
+  `withReconnect` helper wraps every CDP call with automatic
+  reconnect-on-`EPIPE` semantics; liveness timeout prevents indefinite
+  hangs; focus emulation lets keyboard input land reliably on
+  background panes.
+- **44 codesage findings resolved across 19 core files** (commit
+  `05971d7`). See the categorized breakdown in that commit's body;
+  highlights:
+  - **Security** — `news_get_ticker` validates the resolved ticker
+    against a strict regex before constructing the RSS URL;
+    `layout_switch` now requires opt-in `discard_unsaved=true` and
+    never silently destroys unsaved Pine code.
+  - **Race conditions** — `pin_registry` holds the lock on every
+    write (releaseAllSync), re-stats before stale-lock unlink, treats
+    foreign-host PIDs as dead, and snapshots corrupt JSON to
+    `.corrupt.<ts>` instead of silently emptying. `tab._readActivePineScript`
+    captures the CDP client synchronously and closes it on late
+    timeout-loser resolution. `pane_set_symbol` resolves the chart by
+    index inside the eval, removing the focus-then-read-active race.
+  - **Wrong-target safeguards** — `pine_delete`, `pine_open`,
+    `pine_rename`, `indicator_set_inputs`, `watchlist_add_bulk`,
+    `strategy_set_deep_backtest_range`, and the publish/cache flows
+    all refuse-on-ambiguity rather than silently picking the first
+    match.
+  - **Input validation** — `pane_focus`/`pane_set_timeframe` reject
+    non-integer / negative index; `screener` range filters reject
+    non-finite values; `patterns._shape()` rejects bars with non-finite
+    OHLC (root-cause fix for Doji/SpinningTop NaN-strength findings).
+  - **HTTP timeouts** — every CDP-readiness probe in `health.js` now
+    passes `{timeout:1500}` and destroys the request on timeout (no
+    more 15-iteration hang on half-open sockets).
+
+### Fixed
+
+- **TradingView Desktop 3.1.0.7818 compatibility regression** — the
+  webpack chunk extraction for Monaco needed to be re-derived after a
+  hashed module-id shuffle (`429e3e3`).
+- **Tab open/close.** `tab_new` reaches through React's `__reactProps`
+  on the shell page's `+` button (CDP `Input.dispatchMouseEvent` does
+  not fire the handler). `tab_close` uses CDP's
+  `/json/close/<targetId>` (Ctrl+W has the same Electron user-gesture
+  problem Ctrl+T does). (`0afc375`)
+- **EPIPE on TV close.** Dropped `Runtime.enable` from the CDP setup
+  and added a graceful disconnect handler so abrupt TV shutdowns no
+  longer leave the MCP server crash-looping on stale socket writes.
+  (`fb11109`)
+- **Replay stuck-saved-state.** `replay_stop` now nulls
+  `_replaySessionState` on the correct linking path so the next
+  symbol change isn't trapped in the previous replay window. (`f22338d`)
+- **Contract switch + intraday replay reliability** — multiple TV
+  3.1+ DOM transitions tracked. (`afaf592`)
+- **Chart inert-study heuristic** — dropped the false-positive
+  `meta.pine.source` criterion. (`00b8715`)
+
+### Documented
+
+- `IDEAS.md` rolling backlog updated with fork-audit findings,
+  pine_set_source workaround status, EPIPE fix delivery confirmation.
+
+[Unreleased]: https://github.com/iliaal/tradingview-mcp/compare/1.1.0...HEAD
+[1.1.0]: https://github.com/iliaal/tradingview-mcp/releases/tag/1.1.0
+
 ## [1.0.0] - 2026-04-29
 
 First tagged release. Forked from `tradesdontlie/tradingview-mcp` at
@@ -144,5 +290,4 @@ TradingView Desktop via the Chrome DevTools Protocol on port 9222.
 - `MERGED_UPSTREAM_PRS.md` tracks which upstream PRs have been
   ported.
 
-[Unreleased]: https://github.com/iliaal/tradingview-mcp/compare/1.0.0...HEAD
 [1.0.0]: https://github.com/iliaal/tradingview-mcp/releases/tag/1.0.0
