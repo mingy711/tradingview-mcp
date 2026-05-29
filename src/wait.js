@@ -3,6 +3,16 @@ import { evaluate } from './connection.js';
 const DEFAULT_TIMEOUT = 10000;
 const POLL_INTERVAL = 200;
 
+// Loading-spinner probe shared by the chart waiters. Returns true while a
+// visible loader overlay is present. Single source for TV's loader selectors
+// so they don't drift across waiters.
+const IS_LOADING_JS = `(function() {
+  var s = document.querySelector('[class*="loader"]')
+    || document.querySelector('[class*="loading"]')
+    || document.querySelector('[data-name="loading"]');
+  return !!(s && s.offsetParent !== null);
+})()`;
+
 const STUDY_COLLECTIONS = {
   dwglabels: 'labels',
   dwglines: 'lines',
@@ -62,10 +72,7 @@ export async function waitForChartReady(expectedSymbol = null, _expectedTf = nul
     const state = await evaluate(`
       (function() {
         // Check for loading spinner
-        var spinner = document.querySelector('[class*="loader"]')
-          || document.querySelector('[class*="loading"]')
-          || document.querySelector('[data-name="loading"]');
-        var isLoading = spinner && spinner.offsetParent !== null;
+        var isLoading = ${IS_LOADING_JS};
 
         // Try to get bar count from data window or chart
         var barCount = -1;
@@ -131,8 +138,8 @@ export async function waitForChartReady(expectedSymbol = null, _expectedTf = nul
  */
 export async function waitForChartRender(timeout = 5000) {
   const start = Date.now();
-  let lastSignature = null;
-  let stableCount = 0;
+  let prev = null;
+  let stable = 0;
 
   while (Date.now() - start < timeout) {
     const state = await evaluate(`
@@ -150,14 +157,10 @@ export async function waitForChartRender(timeout = 5000) {
           resolution = chart.resolution();
         } catch(e) {}
 
-        var spinner = document.querySelector('[class*="loader"]')
-          || document.querySelector('[class*="loading"]')
-          || document.querySelector('[data-name="loading"]');
-
         return {
           symbol: symbol,
           resolution: resolution,
-          isLoading: !!(spinner && spinner.offsetParent !== null),
+          isLoading: ${IS_LOADING_JS},
           canvasWidth: rect ? Math.round(rect.width) : 0,
           canvasHeight: rect ? Math.round(rect.height) : 0,
         };
@@ -165,20 +168,17 @@ export async function waitForChartRender(timeout = 5000) {
     `);
 
     if (!state || state.isLoading || !state.canvasWidth || !state.canvasHeight) {
-      stableCount = 0;
+      stable = 0;
       await new Promise(r => setTimeout(r, POLL_INTERVAL));
       continue;
     }
 
     const signature = [state.symbol, state.resolution, state.canvasWidth, state.canvasHeight].join('|');
-    if (signature === lastSignature) {
-      stableCount++;
-    } else {
-      stableCount = 0;
-      lastSignature = signature;
-    }
+    if (prev !== null && signature === prev) stable++;
+    else stable = 0;
+    prev = signature;
 
-    if (stableCount >= 3) return true;
+    if (stable >= 3) return true;
 
     await new Promise(r => setTimeout(r, POLL_INTERVAL));
   }
