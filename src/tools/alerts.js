@@ -6,7 +6,10 @@ import * as core from '../core/alerts.js';
 export function registerAlertTools(server) {
   server.tool('alert_create', 'Create a price alert on the active chart symbol via TradingView\'s REST API. Returns the assigned alert_id. Symbol/currency/resolution are inferred from the active chart.', {
     condition: z.string().describe('Alert condition. "crossing" (any direction, default), "greater_than" / "above" / "cross_up" (price crosses upward), "less_than" / "below" / "cross_down" (price crosses downward).'),
-    price: z.coerce.number().describe('Price level for the alert'),
+    price: z.preprocess(
+      (v) => (typeof v === 'string' && v.trim() === '' ? NaN : v),
+      z.coerce.number().refine((n) => Number.isFinite(n), { message: 'price is required and must be a number' }),
+    ).describe('Price level for the alert'),
     message: z.string().optional().describe('Alert message. Defaults to "<TICKER> <condition> <price>".'),
   }, async ({ condition, price, message }) => {
     try { return jsonResult(await core.create({ condition, price, message })); }

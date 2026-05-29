@@ -36,10 +36,11 @@ describe('core/pine.js — smoke', () => {
   });
 
   it('test_getSource_smoke', async () => {
-    // Call 1: ensurePineEditorOpen → true; Call 2: getValue returns source
-    let call = 0;
+    // ensurePineEditorOpen uses evaluate (→true); getValue now goes through
+    // evaluateChecked (truncation-guarded), mocked to return the source.
     installCdpMocks({
-      evaluate: async () => (++call <= 2 ? true : '//@version=6\nindicator("test")\nplot(close)'),
+      evaluate: async () => true,
+      evaluateChecked: async () => '//@version=6\nindicator("test")\nplot(close)',
     });
     const r = await pine.getSource();
     assert.equal(r.success, true);
@@ -232,20 +233,14 @@ describe('core/pine.js — smoke', () => {
 
   // ── B.16 saveAs ────────────────────────────────────────────────────
   it('test_saveAs_smoke', async () => {
-    let evalIdx = 0;
     let asyncIdx = 0;
     installCdpMocks({
-      // Each evaluate call: 1=ensurePineEditorOpen check, 2=getValue source
-      evaluate: async () => {
-        evalIdx++;
-        if (evalIdx === 1) return true;            // FIND_MONACO non-null check (ensurePineEditorOpen)
-        return 'indicator("test")\nplot(close)';   // editor.getValue()
-      },
-      // evaluateAsync sequence: save/new POST → openScript list → openScript get
+      evaluate: async () => true,                              // ensurePineEditorOpen checks
+      evaluateChecked: async () => 'indicator("test")\nplot(close)', // editor.getValue()
+      // evaluateAsync sequence: save/new POST → openScript(by id) fetch chain
       evaluateAsync: async () => {
         asyncIdx++;
         if (asyncIdx === 1) return { status: 200, data: { scriptIdPart: 'new-id', name: 'My Copy' } };
-        // openScript invocation chain (list → get → setValue)
         return { success: true, name: 'My Copy', id: 'new-id', lines: 2 };
       },
     });
@@ -261,14 +256,10 @@ describe('core/pine.js — smoke', () => {
   // the error and falsely report success — leaving the editor pointed at the
   // previous script so subsequent pine_save would clobber the wrong script.
   it('test_saveAs_smoke_surfaces_reopen_failure', async () => {
-    let evalIdx = 0;
     let asyncIdx = 0;
     installCdpMocks({
-      evaluate: async () => {
-        evalIdx++;
-        if (evalIdx === 1) return true;
-        return 'indicator("test")\nplot(close)';
-      },
+      evaluate: async () => true,
+      evaluateChecked: async () => 'indicator("test")\nplot(close)',
       evaluateAsync: async () => {
         asyncIdx++;
         if (asyncIdx === 1) return { status: 200, data: { scriptIdPart: 'new-id', name: 'My Copy' } };
@@ -286,7 +277,8 @@ describe('core/pine.js — smoke', () => {
 
   it('test_saveAs_smoke_throws_on_save_failure', async () => {
     installCdpMocks({
-      evaluate: async () => 'source-code',
+      evaluate: async () => true,
+      evaluateChecked: async () => 'source-code',
       evaluateAsync: async () => ({ status: 500, data: { error: 'server err' } }),
     });
     await assert.rejects(

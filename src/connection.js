@@ -88,8 +88,13 @@ export async function getClient() {
       // accept the request but never respond, hanging the entire MCP call.
       // Clear the timer on resolution to avoid an unhandled rejection 2s
       // later when the loser promise is no longer awaited.
+      const livenessProbe = client.Runtime.evaluate({ expression: '1', returnByValue: true });
+      // If the timeout wins the race, this probe is abandoned; a later
+      // client.close() rejects all pending callbacks, which would surface as
+      // an unhandledRejection (and can kill the process). Swallow it.
+      livenessProbe.catch(() => {});
       await Promise.race([
-        client.Runtime.evaluate({ expression: '1', returnByValue: true }),
+        livenessProbe,
         new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('liveness timeout')), 2000); }),
       ]);
       clearTimeout(timer);
@@ -140,7 +145,18 @@ export async function withReconnect(operation, maxRetries = 3) {
   throw new Error(`CDP operation failed after ${maxRetries} reconnect attempts: ${lastError?.message || lastError}`);
 }
 
+let _connecting = null;
 export async function connect() {
+  // Serialize concurrent connects. Without this, two calls that arrive while
+  // client===null each open a CDP socket; the last assignment to the module
+  // `client` wins and the earlier socket leaks with no reference to close it.
+  if (_connecting) return _connecting;
+  _connecting = _doConnect();
+  try { return await _connecting; }
+  finally { _connecting = null; }
+}
+
+async function _doConnect() {
   let lastError;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
@@ -257,14 +273,27 @@ export async function releaseAndUnpin() {
 }
 
 let _registryExitRegistered = false;
+let _gracefulShutdownOwner = false;
+
+// Marked by a long-lived host (the MCP server) that installs its own async
+// SIGINT/SIGTERM handler to flush the CDP socket cleanly before exit. When
+// set, the registry's signal handlers do their synchronous release but do
+// NOT call process.exit — letting the owner's async teardown finish instead
+// of racing it to process.exit (which would skip the CDP flush and trigger
+// TV's EPIPE "Critical Error" dialog).
+export function setGracefulShutdownOwner() { _gracefulShutdownOwner = true; }
+
 function ensureRegistryExitHandler() {
   if (_registryExitRegistered) return;
   _registryExitRegistered = true;
   // releaseAllSync is best-effort and swallows its own errors — safe to
-  // attach to multiple signals without double-cleanup concerns.
+  // attach to multiple signals without double-cleanup concerns. The 'exit'
+  // event does NOT fire on a raw signal kill, so the signal handlers below
+  // do the synchronous release themselves (and exit only when nobody else
+  // owns graceful shutdown).
   process.on('exit', _registryReleaseAllSync);
-  process.on('SIGINT', () => { _registryReleaseAllSync(); process.exit(130); });
-  process.on('SIGTERM', () => { _registryReleaseAllSync(); process.exit(143); });
+  process.on('SIGINT', () => { _registryReleaseAllSync(); if (!_gracefulShutdownOwner) process.exit(130); });
+  process.on('SIGTERM', () => { _registryReleaseAllSync(); if (!_gracefulShutdownOwner) process.exit(143); });
 }
 
 async function findChartTarget() {
@@ -360,9 +389,9 @@ export async function evaluateAsync(expression) {
 export async function evaluateChecked(expression, opts = {}) {
   if (_testOverrides?.evaluateChecked) return _testOverrides.evaluateChecked(expression, opts);
   const label = opts.label || 'evaluate';
-  const wrapped = `(function() {
+  const wrapped = `(async function() {
     var __d;
-    try { __d = (${expression}); }
+    try { __d = await (${expression}); }
     catch (__e) { return { __err: 'page-side eval: ' + String(__e && __e.message || __e) }; }
     var __s;
     try { __s = JSON.stringify(__d); }
@@ -370,7 +399,9 @@ export async function evaluateChecked(expression, opts = {}) {
     if (__s === undefined) return { __s: 'undefined', __sz: 9, __isUndef: true };
     return { __s: __s, __sz: __s.length };
   })()`;
-  const result = await evaluate(wrapped, opts);
+  // awaitPromise so a promise-returning expression is resolved page-side; the
+  // async wrapper makes `await` of a plain value a no-op, so sync reads work too.
+  const result = await evaluate(wrapped, { ...opts, awaitPromise: true });
   if (!result) throw new Error(`${label}: no result from page`);
   if (result.__err) throw new Error(`${label}: ${result.__err}`);
   if (result.__isUndef) return undefined;

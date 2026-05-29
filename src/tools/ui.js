@@ -38,7 +38,7 @@ export function registerUiTools(server) {
 
   server.tool('layout_switch', 'Switch to a saved chart layout by name or ID. If the current layout has unsaved changes (Pine code, drawings, indicator settings), the call returns {success:false, unsaved_dialog_present:true} unless discard_unsaved=true is passed. discard_unsaved=true loses those changes irrevocably.', {
     name: z.string().describe('Name or ID of the layout to switch to'),
-    discard_unsaved: z.boolean().optional().describe('Set true to proceed past the unsaved-changes dialog and lose any unsaved work on the current layout. Default false (safe).'),
+    discard_unsaved: boolish.optional().describe('Set true to proceed past the unsaved-changes dialog and lose any unsaved work on the current layout. Default false (safe).'),
   }, async ({ name, discard_unsaved }) => {
     try { return jsonResult(await core.layoutSwitch({ name, discard_unsaved })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

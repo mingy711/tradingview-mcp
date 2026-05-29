@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { boolish } from './_validation.js';
 import { jsonResult } from './_format.js';
 import * as core from '../core/chart.js';
 
@@ -10,9 +11,10 @@ export function registerChartTools(server) {
 
   server.tool('chart_set_symbol', 'Change the chart symbol', {
     symbol: z.string().describe('Symbol to set (e.g., BTCUSD, AAPL, ES1!, NYMEX:CL1!)'),
-  }, async ({ symbol }) => {
-    try { return jsonResult(await core.setSymbol({ symbol })); }
-    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+    discard_unsaved: boolish.optional().describe('Proceed past an unsaved-changes dialog and lose unsaved Pine/drawing edits (default false — the switch is refused with an UNSAVED_CHANGES error so work is never silently discarded).'),
+  }, async ({ symbol, discard_unsaved }) => {
+    try { return jsonResult(await core.setSymbol({ symbol, discard_unsaved })); }
+    catch (err) { return jsonResult({ success: false, error: err.message, ...(err.code ? { code: err.code } : {}), ...(err.unsaved_changes ? { unsaved_changes: true } : {}) }, true); }
   });
 
   server.tool('chart_set_timeframe', 'Change the chart timeframe/resolution', {
@@ -54,7 +56,7 @@ export function registerChartTools(server) {
   server.tool('chart_set_visible_range', 'Zoom the chart to a specific date range (unix seconds). When `from` predates the loaded bar buffer, TV silently clamps the zoom; `auto_extend_cache=true` (default) detects the clamp and briefly enters replay mode at `from` to preload historical bars, then retries. Response carries `cache_extended` + final `clamped` flag.', {
     from: z.coerce.number().describe('Start of range (unix timestamp in seconds)'),
     to: z.coerce.number().describe('End of range (unix timestamp in seconds)'),
-    auto_extend_cache: z.boolean().optional().describe('Default true. When the requested range pre-dates the loaded bar buffer, auto-preload via brief replay-mode entry.'),
+    auto_extend_cache: boolish.optional().describe('Default true. When the requested range pre-dates the loaded bar buffer, auto-preload via brief replay-mode entry.'),
   }, async ({ from, to, auto_extend_cache }) => {
     try { return jsonResult(await core.setVisibleRange({ from, to, auto_extend_cache })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

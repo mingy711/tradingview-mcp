@@ -14,7 +14,7 @@ function _resolve(deps) {
   };
 }
 import { existsSync, readFileSync } from 'fs';
-import { execSync, spawn } from 'child_process';
+import { execSync, execFileSync, spawn } from 'child_process';
 
 // True when running on WSL2 — process.platform reports 'linux' but the
 // actual TradingView install is on the Windows host, reachable via /mnt/c/
@@ -310,7 +310,11 @@ export async function launch({ port, kill_existing } = {}) {
       } else if (platform === 'win32') {
         execSync('taskkill /F /IM TradingView.exe', { timeout: 5000 });
       } else {
-        execSync('pkill -f TradingView', { timeout: 5000 });
+        // Match the resolved binary path, not the bare substring "TradingView":
+        // `pkill -f TradingView` matches any process whose argv merely contains
+        // that string (the launcher run from a TradingView* path, an editor, a
+        // log tailer). argv form (execFileSync) also avoids shell interpolation.
+        execFileSync('pkill', ['-f', tvPath], { timeout: 5000, stdio: 'ignore' });
       }
       await new Promise(r => setTimeout(r, 1500));
     } catch { /* may not be running */ }
@@ -358,13 +362,15 @@ export async function launch({ port, kill_existing } = {}) {
       if (platform === 'darwin') {
         // open -a only attaches args to a fresh launch — kill any running TV
         // first or it just reactivates the existing (no-CDP) window.
-        try { execSync('pkill -f TradingView', { timeout: 5000, stdio: 'ignore' }); } catch {}
+        try { execFileSync('pkill', ['-f', tvPath], { timeout: 5000, stdio: 'ignore' }); } catch {}
         await new Promise(r => setTimeout(r, 2000));
         const appMatch = tvPath.match(/^(.+\.app)\//);
         if (appMatch) {
           const appBundle = appMatch[1];
           try {
-            execSync(`open -a "${appBundle.split('"').join('')}" --args --remote-debugging-port=${cdpPort}`, { timeout: 5000, stdio: 'ignore' });
+            // argv form: the bundle path goes straight to `open` without a
+            // shell, so a path with spaces/metacharacters can't break out.
+            execFileSync('open', ['-a', appBundle, '--args', `--remote-debugging-port=${cdpPort}`], { timeout: 5000, stdio: 'ignore' });
           } catch { /* open returns non-zero even on success sometimes */ }
         } else {
           child = spawn(tvPath, [], { detached: true, stdio: 'ignore' });
@@ -410,7 +416,7 @@ export async function launch({ port, kill_existing } = {}) {
   }
 
   return {
-    success: true, platform: wsl ? 'wsl' : platform, binary: tvPath, pid: child?.pid ?? null, cdp_port: cdpPort, cdp_ready: false,
+    success: false, platform: wsl ? 'wsl' : platform, binary: tvPath, pid: child?.pid ?? null, cdp_port: cdpPort, cdp_ready: false,
     warning: portMismatch
       ? `TradingView launched on port ${cdpPort} but CDP is not yet responding. Note: the MCP server's CDP client is bound to ${CDP_PORT} — set TV_CDP_PORT=${cdpPort} and restart the server to talk to this instance.`
       : 'TradingView launched but CDP not responding yet. It may still be loading. Try tv_health_check in a few seconds.',
@@ -483,7 +489,11 @@ export async function ensureCDP({ _deps } = {}) {
       execSync('tasklist /FI "IMAGENAME eq TradingView.exe" | findstr TradingView', { timeout: 3000, stdio: 'ignore' });
       tvRunning = true;
     } else {
-      execSync('pgrep -f TradingView', { timeout: 3000, stdio: 'ignore' });
+      // -ix (case-insensitive exact process name) not -f (full-cmdline
+      // substring): -f would false-positive on the launcher/editor/log-tailer,
+      // while a case-sensitive -x would miss lowercase Linux installs
+      // (/opt/TradingView/tradingview, /usr/bin/tradingview).
+      execSync('pgrep -ix TradingView', { timeout: 3000, stdio: 'ignore' });
       tvRunning = true;
     }
   } catch { /* not running */ }

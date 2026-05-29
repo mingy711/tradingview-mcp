@@ -42,7 +42,7 @@ export function registerTabTools(server) {
     title: z.string().optional().describe('Substring of tab title (case-insensitive)'),
     symbol: z.string().optional().describe('Substring of chart symbol (e.g. "GC1!", "NVDA")'),
     url: z.string().optional().describe('Substring of tab URL (e.g. "chart/BdrFz9HL")'),
-    force: z.boolean().optional().describe('Take over an existing claim. Use only when you know the other process is stuck or you intend to displace it.'),
+    force: boolish.optional().describe('Take over an existing claim. Use only when you know the other process is stuck or you intend to displace it.'),
   }, async ({ id, title, symbol, url, force }) => {
     try { return jsonResult(await core.pin({ id, title, symbol, url, force })); }
     catch (err) {

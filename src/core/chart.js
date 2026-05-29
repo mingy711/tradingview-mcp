@@ -120,7 +120,7 @@ export async function getState({ _deps } = {}) {
   return { success: true, ...state };
 }
 
-export async function setSymbol({ symbol, _deps }) {
+export async function setSymbol({ symbol, discard_unsaved = false, _deps }) {
   const { evaluate, evaluateAsync, waitForChartReady, waitForStudiesReady, dismissBlockingDialogs, getClient, disconnect } = _resolve(_deps);
 
   // Trigger the symbol switch; don't gate on DOM readiness here.
@@ -229,7 +229,21 @@ export async function setSymbol({ symbol, _deps }) {
   // skips this step because dismissing a dialog won't refetch the chart
   // data; hard reload is the only recovery for that case.)
   if (!_symbolMatches(symbol, actual)) {
-    try { dismissedDialogs = await dismissBlockingDialogs({ evaluate }); } catch {}
+    try { dismissedDialogs = await dismissBlockingDialogs({ evaluate, discardUnsaved: !!discard_unsaved }); } catch {}
+    // Refuse rather than silently discard unsaved Pine/drawing changes. The
+    // dialog was detected but not clicked (blocked) because discard_unsaved
+    // wasn't set — mirror layout_switch's opt-in-to-lose-work contract.
+    const blocked = dismissedDialogs.find(d => d.blocked);
+    if (blocked) {
+      const err = new Error(
+        `Switching to "${symbol}" is blocked by an unsaved-changes dialog (${blocked.note}). ` +
+        `Save your work first, or pass discard_unsaved:true to switch and lose it.`
+      );
+      err.code = 'UNSAVED_CHANGES';
+      err.requested = symbol;
+      err.unsaved_changes = true;
+      throw err;
+    }
     await _doSetSymbol();
     ({ actual, overlay: errorOverlay } = await _checkHealthy(8000));
   }
@@ -343,17 +357,60 @@ export async function setSymbol({ symbol, _deps }) {
   };
 }
 
+// TV's resolution() canonicalizes day/week/month as 1D/1W/1M; callers may
+// pass D/W/M. Normalize both sides so a successful change isn't misread as a
+// mismatch (and vice-versa).
+function _normalizeResolution(r) {
+  let s = String(r == null ? '' : r).trim().toUpperCase();
+  if (s === 'D') s = '1D';
+  else if (s === 'W') s = '1W';
+  else if (s === 'M') s = '1M';
+  return s;
+}
+
 export async function setTimeframe({ timeframe, _deps }) {
-  const { evaluate, waitForChartReady, waitForStudiesReady } = _resolve(_deps);
-  await evaluate(`
-    (function() {
-      var chart = ${CHART_API};
-      chart.setResolution(${safeString(timeframe)}, {});
-    })()
-  `);
+  const { evaluate, waitForChartReady, waitForStudiesReady, dismissBlockingDialogs } = _resolve(_deps);
+  const setResJs = `(function() { var chart = ${CHART_API}; chart.setResolution(${safeString(timeframe)}, {}); })()`;
+
+  const before = await evaluate(`${CHART_API}.resolution()`);
+  await evaluate(setResJs);
+  let actual = await evaluate(`${CHART_API}.resolution()`);
+
+  // If the resolution didn't move AND we asked for a different one, a modal
+  // (Leave replay / unsaved changes) likely absorbed the change — dismiss and
+  // retry once, mirroring setSymbol.
+  let dismissedDialogs = [];
+  let blockedUnsaved = false;
+  if (actual === before && _normalizeResolution(timeframe) !== _normalizeResolution(before)) {
+    // discardUnsaved:false — a timeframe change must never silently discard
+    // unsaved Pine/drawing edits (this tool has no discard opt-in). The
+    // "Leave replay" dialog is still dismissed; an unsaved-changes dialog is
+    // left in place and reported as blocked.
+    try { dismissedDialogs = await dismissBlockingDialogs({ evaluate, discardUnsaved: false }); } catch {}
+    blockedUnsaved = dismissedDialogs.some(d => d.blocked);
+    if (!blockedUnsaved) {
+      await evaluate(setResJs);
+      actual = await evaluate(`${CHART_API}.resolution()`);
+    }
+  }
+
   const ready = await waitForChartReady(null);
   const studies_ready = await waitForStudiesReady();
-  return { success: true, timeframe, chart_ready: ready, studies_ready };
+  const matched = _normalizeResolution(timeframe) === _normalizeResolution(actual);
+  return {
+    success: true,
+    timeframe: actual,          // the ACTUAL resolution, not the requested string
+    requested: timeframe,
+    changed: actual !== before,
+    chart_ready: ready,
+    studies_ready,
+    dismissed_dialogs: dismissedDialogs.length ? dismissedDialogs : undefined,
+    unsaved_changes: blockedUnsaved || undefined,
+    warning: matched ? undefined
+      : blockedUnsaved
+        ? `Timeframe change blocked by an unsaved-changes dialog — left it in place rather than discarding your work. Save first, then retry. Chart resolution is still "${actual}".`
+        : `Requested timeframe "${timeframe}" but chart resolution is "${actual}" — TV may have rejected it (invalid timeframe or a blocking dialog).`,
+  };
 }
 
 export async function setType({ chart_type, _deps }) {
@@ -363,7 +420,14 @@ export async function setType({ chart_type, _deps }) {
     'Renko': 4, 'Kagi': 5, 'PointAndFigure': 6, 'LineBreak': 7,
     'HeikinAshi': 8, 'HollowCandles': 9,
   };
-  const typeNum = typeMap[chart_type] ?? Number(chart_type);
+  // Only fall back to a numeric type for a clean integer string. Number("")
+  // is 0 and Number(" 3 ")/"0x5" coerce too — those should be rejected, not
+  // silently turned into a chart type.
+  let typeNum = typeMap[chart_type];
+  if (typeNum === undefined) {
+    const t = String(chart_type).trim();
+    typeNum = /^\d+$/.test(t) ? Number(t) : NaN;
+  }
   if (isNaN(typeNum) || typeNum < 0 || typeNum > 9 || !Number.isInteger(typeNum)) {
     throw new Error(`Unknown chart type: ${chart_type}. Use a name (Candles, Line, etc.) or number (0-9).`);
   }
@@ -663,8 +727,15 @@ export async function setVisibleRange({ from, to, auto_extend_cache = true, _dep
 export async function scrollToDate({ date, _deps } = {}) {
   const { evaluate } = _resolve(_deps);
   let timestamp;
-  if (/^\d+$/.test(date)) timestamp = Number(date);
-  else timestamp = Math.floor(new Date(date).getTime() / 1000);
+  if (/^\d+$/.test(date)) {
+    timestamp = Number(date);
+    // A 13-digit value is a millisecond epoch (TV expects seconds); a bare
+    // seconds value above ~1e11 is already past year 5138, so treat anything
+    // that large as milliseconds rather than scrolling ~50,000 years out.
+    if (timestamp > 1e11) timestamp = Math.floor(timestamp / 1000);
+  } else {
+    timestamp = Math.floor(new Date(date).getTime() / 1000);
+  }
   if (isNaN(timestamp)) throw new Error(`Could not parse date: ${date}. Use ISO format (2024-01-15) or unix timestamp.`);
 
   const resolution = await evaluate(`${CHART_API}.resolution()`);

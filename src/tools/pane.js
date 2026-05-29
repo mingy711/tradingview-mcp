@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { boolish } from './_validation.js';
 import { jsonResult } from './_format.js';
 import * as core from '../core/pane.js';
 import * as dataCore from '../core/data.js';
@@ -43,14 +44,14 @@ export function registerPaneTools(server) {
     indices: z.array(z.coerce.number()).optional().describe('Which panes (0-based). Omit = all panes.'),
     reads: z.object({
       pine_tables:   z.object({ study_filter: z.string().optional() }).optional().describe('Read pine table data. Optional study_filter to target one indicator by name substring.'),
-      pine_lines:    z.object({ study_filter: z.string().optional(), verbose: z.boolean().optional() }).optional().describe('Read pine horizontal/level lines.'),
-      pine_labels:   z.object({ study_filter: z.string().optional(), max_labels: z.number().optional(), verbose: z.boolean().optional() }).optional().describe('Read pine text labels. max_labels caps per-study (default 50).'),
-      pine_boxes:    z.object({ study_filter: z.string().optional(), verbose: z.boolean().optional() }).optional().describe('Read pine box/zone rectangles.'),
-      study_values:  z.boolean().optional().describe('Read current values from all visible indicators per pane.'),
-      ohlcv_summary: z.union([z.boolean(), z.object({ bars: z.number().optional() })]).optional().describe('Read compact OHLCV summary per pane. Pass { bars: N } to override default 20.'),
-      drawings:      z.union([z.boolean(), z.object({ with_properties: z.boolean().optional() })]).optional().describe('Read hand-drawn objects per pane.'),
+      pine_lines:    z.object({ study_filter: z.string().optional(), verbose: boolish.optional() }).optional().describe('Read pine horizontal/level lines.'),
+      pine_labels:   z.object({ study_filter: z.string().optional(), max_labels: z.coerce.number().optional(), verbose: boolish.optional() }).optional().describe('Read pine text labels. max_labels caps per-study (default 50).'),
+      pine_boxes:    z.object({ study_filter: z.string().optional(), verbose: boolish.optional() }).optional().describe('Read pine box/zone rectangles.'),
+      study_values:  boolish.optional().describe('Read current values from all visible indicators per pane.'),
+      ohlcv_summary: z.union([boolish, z.object({ bars: z.coerce.number().optional() })]).optional().describe('Read compact OHLCV summary per pane. Pass { bars: N } to override default 20.'),
+      drawings:      z.union([boolish, z.object({ with_properties: boolish.optional() })]).optional().describe('Read hand-drawn objects per pane.'),
     }).describe('Which data types to read per pane. At least one must be set.'),
-    wait_ms: z.number().optional().describe('Optional sleep before evaluation — insurance after layout/symbol mutations (max 5000).'),
+    wait_ms: z.coerce.number().optional().describe('Optional sleep before evaluation — insurance after layout/symbol mutations (max 5000).'),
   }, async ({ indices, reads, wait_ms }) => {
     try { return jsonResult(await dataCore.batchReadPanes({ indices, reads, wait_ms })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

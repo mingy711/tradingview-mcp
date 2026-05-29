@@ -107,7 +107,10 @@ process.stderr.write('   Ensure your usage complies with TradingView\'s Terms of
 // TradingView doesn't see a dangling connection. Pairs with the
 // no-Runtime.enable change in connection.js to eliminate the EPIPE-on-
 // TV-close crash.
-import { disconnect as disconnectCdp } from './connection.js';
+import { disconnect as disconnectCdp, setGracefulShutdownOwner } from './connection.js';
+// Claim ownership of graceful shutdown so the registry's signal handlers
+// don't process.exit() out from under our async CDP teardown below.
+setGracefulShutdownOwner();
 let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;

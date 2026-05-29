@@ -65,7 +65,9 @@ export async function captureScreenshot({ region, filename, method, output_dir, 
         return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
       })()
     `);
-    if (bounds) clip = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height, scale: 1 };
+    // A present-but-collapsed element has a zero-dimension rect; a zero-size
+    // clip makes Page.captureScreenshot throw. Fall back to a full capture.
+    if (bounds && bounds.width > 0 && bounds.height > 0) clip = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height, scale: 1 };
   } else if (region === 'strategy_tester') {
     const bounds = await evaluate(`
       (function() {
@@ -76,7 +78,7 @@ export async function captureScreenshot({ region, filename, method, output_dir, 
         return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
       })()
     `);
-    if (bounds) clip = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height, scale: 1 };
+    if (bounds && bounds.width > 0 && bounds.height > 0) clip = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height, scale: 1 };
   }
 
   const params = { format: 'png' };

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { boolish } from './_validation.js';
 import { jsonResult } from './_format.js';
 import * as core from '../core/pine.js';
 
@@ -80,10 +81,11 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_save_as', 'Save the current Pine script as a new file (copy). Reopens the new copy so subsequent saves go to it instead of the original.', {
+  server.tool('pine_save_as', 'Save the current Pine script as a new file (copy). Reopens the new copy so subsequent saves go to it instead of the original. Refuses if a script with that name already exists unless overwrite is true.', {
     name: z.string().describe('Name for the new copy'),
-  }, async ({ name }) => {
-    try { return jsonResult(await core.saveAs({ name })); }
+    overwrite: boolish.optional().describe('Replace an existing script with the same name (default false — a name collision is refused so an unrelated script is never silently overwritten).'),
+  }, async ({ name, overwrite }) => {
+    try { return jsonResult(await core.saveAs({ name, overwrite })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

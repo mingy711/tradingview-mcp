@@ -136,7 +136,12 @@ function buildGraphicsJS(collectionName, mapKey, filter, maxItems, includeEmpty)
 
 function _toEpochSeconds(val) {
   if (val == null) return null;
-  if (typeof val === 'number') return val;
+  if (typeof val === 'number') {
+    // bar_time is epoch seconds; a caller passing a millisecond epoch (the JS
+    // Date.now() convention) would compare ms against seconds and filter out
+    // everything. Anything past ~year 5138 in seconds is really milliseconds.
+    return val > 1e11 ? Math.floor(val / 1000) : val;
+  }
   const d = new Date(val);
   const t = d.getTime();
   if (isNaN(t)) return null;
@@ -179,7 +184,7 @@ function _formatOhlcv({ data, summary }) {
       high: Math.max(...highs), low: Math.min(...lows),
       range: Math.round((Math.max(...highs) - Math.min(...lows)) * 100) / 100,
       change: Math.round((last.close - first.open) * 100) / 100,
-      change_pct: Math.round(((last.close - first.open) / first.open) * 10000) / 100 + '%',
+      change_pct: first.open ? Math.round(((last.close - first.open) / first.open) * 10000) / 100 + '%' : 'n/a',
       avg_volume: Math.round(volumes.reduce((a, b) => a + b, 0) / volumes.length),
       last_5_bars: bars.slice(-5),
     };
@@ -222,6 +227,12 @@ export async function getOhlcv({ symbol, count, summary, _deps } = {}) {
       `);
       if (probe && probe.symbol) restoreSymbol = probe.symbol;
     } catch { /* fall through with restoreSymbol still null */ }
+  }
+
+  // Refuse rather than strand: if we can't read the current symbol, switching
+  // would leave the user's chart on the requested symbol with no way back.
+  if (!restoreSymbol) {
+    throw new Error('Cannot safely read a non-active symbol: failed to read the current chart symbol to restore afterwards. Retry, or read the symbol on the active chart.');
   }
 
   await setSymbol({ symbol, _deps });
@@ -638,6 +649,10 @@ export async function getQuote({ symbol, route, _deps } = {}) {
       if (probe && probe.symbol) restoreSymbol = probe.symbol;
     } catch { /* fall through with restoreSymbol still null */ }
   }
+  // Refuse rather than strand the user's chart on the requested symbol.
+  if (!restoreSymbol) {
+    throw new Error('Cannot safely quote a non-active symbol: failed to read the current chart symbol to restore afterwards. Retry, or use route:"rest" for a non-switching quote.');
+  }
   await setSymbol({ symbol, _deps });
   let quoteResult;
   let restored = false;
@@ -864,6 +879,11 @@ export async function getPineShapes({ study_filter, last_n_bars, _deps } = {}) {
             for (var sp = 0; sp < shapePlots.length; sp++) {
               var di = shapePlots[sp].dataIndex;
               var val = row[di];
+              // Treat 0/false as "no signal": boolean/numeric plotshape and
+              // plotchar series represent inactive bars as false or 0, so
+              // including them would flood results with false positives. (A
+              // shape plotted at a literal price of 0 is a rare edge case not
+              // worth that cost.)
               if (val && val !== 0 && !isNaN(val)) {
                 var mainRow = mainBars.valueAt(b);
                 var ohlc = null;
@@ -1180,7 +1200,7 @@ export async function batchReadPanes({ indices, reads, wait_ms, _deps } = {}) {
             open: first.open, close: last.close, high: high, low: low,
             range: Math.round((high - low) * 100) / 100,
             change: Math.round((last.close - first.open) * 100) / 100,
-            change_pct: Math.round(((last.close - first.open) / first.open) * 10000) / 100 + '%',
+            change_pct: first.open ? Math.round(((last.close - first.open) / first.open) * 10000) / 100 + '%' : 'n/a',
             avg_volume: Math.round(volSum / out.length),
             last_5_bars: out.slice(-5),
             total_bars: bars.size()
@@ -1364,7 +1384,12 @@ export async function getMultiTimeframe({ timeframes, study_filter, include_ohlc
       }
     }
   } finally {
-    if (originalTf && tfs[tfs.length - 1] !== originalTf) {
+    // Always restore the original timeframe. The previous guard skipped
+    // restore when the last requested tf equalled originalTf as a string, but
+    // TV's resolution() is canonical ("1D" vs a "D" request) so the compare
+    // was unreliable — and if a mid-loop setTimeframe threw, the chart was
+    // left on the wrong tf. Re-setting the same tf is cheap and idempotent.
+    if (originalTf) {
       try { await _setTimeframe({ timeframe: originalTf, _deps }); } catch {}
     }
   }

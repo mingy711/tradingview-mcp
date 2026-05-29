@@ -62,11 +62,16 @@ const DISMISS_PATTERNS_JSON = JSON.stringify(
  *
  * @param {object} opts
  * @param {Function} [opts.evaluate] - injected evaluate (test override)
+ * @param {boolean} [opts.discardUnsaved=true] - when false, the data-loss
+ *   dialogs (unsaved_changes, save_script) are DETECTED but NOT clicked;
+ *   they're reported with `blocked: true` so the caller can refuse instead of
+ *   silently discarding unsaved work. Other dialogs are still dismissed.
  */
-export async function dismissBlockingDialogs({ evaluate = _evaluate } = {}) {
+export async function dismissBlockingDialogs({ evaluate = _evaluate, discardUnsaved = true } = {}) {
   const dismissed = await evaluate(`
     (function() {
       var patterns = ${DISMISS_PATTERNS_JSON};
+      var discardUnsaved = ${discardUnsaved ? 'true' : 'false'};
       var dismissed = [];
       var alreadyMatched = {};
       // Two pattern types:
@@ -147,6 +152,15 @@ export async function dismissBlockingDialogs({ evaluate = _evaluate } = {}) {
             if (visibleBtns.length > pat.button_set.length + 3) continue;
           } else {
             continue;
+          }
+
+          // Destructive-discard gate: when the caller hasn't opted into
+          // discarding, detect these dialogs but DON'T click their discard
+          // button — report them blocked so the caller can refuse.
+          if (!discardUnsaved && (pat.note === 'unsaved_changes' || pat.note === 'save_script')) {
+            dismissed.push({ note: pat.note, blocked: true });
+            alreadyMatched[pat.note] = true;
+            break;
           }
 
           // Click the matching button

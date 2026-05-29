@@ -3,12 +3,13 @@
  * All functions accept plain options objects and return plain JS objects.
  * They throw on error (callers catch and format).
  */
-import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, evaluateChecked as _evaluateChecked, getClient as _getClient } from '../connection.js';
 
 function _resolve(deps) {
   return {
     evaluate: deps?.evaluate || _evaluate,
     evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
+    evaluateChecked: deps?.evaluateChecked || _evaluateChecked,
     getClient: deps?.getClient || _getClient,
   };
 }
@@ -420,17 +421,20 @@ export async function check({ source }) {
 // ── Functions requiring TradingView connection ──
 
 export async function getSource({ _deps } = {}) {
-  const { evaluate } = _resolve(_deps);
+  const { evaluateChecked } = _resolve(_deps);
   const editorReady = await ensurePineEditorOpen({ _deps });
   if (!editorReady) throw new Error('Could not open Pine Editor or Monaco not found in React fiber tree.');
 
-  const source = await evaluate(`
+  // evaluateChecked (not evaluate): a large script's getValue() can exceed
+  // CDP's silent-truncation threshold; the length checksum surfaces a cut-off
+  // read as an error instead of returning a corrupted source.
+  const source = await evaluateChecked(`
     (function() {
       var m = ${FIND_MONACO};
       if (!m) return null;
       return m.editor.getValue();
     })()
-  `);
+  `, { label: 'pine_get_source' });
 
   if (source === null || source === undefined) {
     throw new Error('Monaco editor found but getValue() returned null.');
@@ -854,7 +858,16 @@ export async function newScript({ type, _deps }) {
 
   if (!set) throw new Error('Monaco editor not found. Ensure Pine Editor is open.');
 
-  return { success: true, type, action: 'new_script_created', template: typeMap[type] };
+  // setValue swaps Monaco's buffer but does NOT rebind the editor's active
+  // script slot — it still points at whatever cloud script was open. A
+  // subsequent pine_save / pine_compile would write this blank template back
+  // over that script (the same clobber class #158 fixed for pine_open). Flag
+  // it so callers don't blind-save; pine_save_as persists as a distinct script.
+  return {
+    success: true, type, action: 'new_script_created', template: typeMap[type],
+    slot_rebound: false,
+    warning: 'pine_new replaced the editor buffer with a blank template but did not rebind the editor to a new script slot. A subsequent pine_save / pine_compile may write this template back over the previously-open script. Use pine_save_as to persist it as a distinct new script.',
+  };
 }
 
 export async function openScript({ name, id, _deps }) {
@@ -1367,22 +1380,27 @@ async function _currentScriptInfo(_deps, { strict = true } = {}) {
  * Without the reopen, subsequent pine_save would write back to the
  * previous script — not the saved-as copy.
  */
-export async function saveAs({ name, _deps }) {
-  const { evaluate, evaluateAsync } = _resolve(_deps);
+export async function saveAs({ name, overwrite = false, _deps }) {
+  const { evaluateChecked, evaluateAsync } = _resolve(_deps);
   const editorReady = await ensurePineEditorOpen({ _deps });
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
-  const source = await evaluate(`
+  // evaluateChecked: a large editor buffer can exceed CDP's silent-truncation
+  // threshold; without the checksum a cut-off source would be POSTed to the
+  // cloud, persisting a corrupted copy.
+  const source = await evaluateChecked(`
     (function() { var m = ${FIND_MONACO}; return m ? m.editor.getValue() : null; })()
-  `);
+  `, { label: 'pine_save_as_read' });
   if (!source) throw new Error('Could not read source from Monaco editor.');
 
   const copyName = name || 'Copy';
+  // Default overwrite:false so "save as a copy" never silently replaces an
+  // existing same-named cloud script. Caller must pass overwrite:true to replace.
   const result = await evaluateAsync(`
     (function() {
       var fd = new FormData();
       fd.append('source', ${JSON.stringify(source)});
-      return fetch('https://pine-facade.tradingview.com/pine-facade/save/new?name=' + encodeURIComponent(${JSON.stringify(copyName)}) + '&allow_overwrite=true', {
+      return fetch('https://pine-facade.tradingview.com/pine-facade/save/new?name=' + encodeURIComponent(${JSON.stringify(copyName)}) + '&allow_overwrite=${overwrite ? 'true' : 'false'}', {
         method: 'POST', credentials: 'include', body: fd,
       })
         .then(function(r) { return r.json().then(function(d) { return { status: r.status, data: d }; }); })
@@ -1390,20 +1408,29 @@ export async function saveAs({ name, _deps }) {
     })()
   `);
   if (result?.error) throw new Error(result.error);
-  if (result?.status >= 400) throw new Error('pine-facade save/new failed: ' + JSON.stringify(result.data));
+  if (result?.status >= 400) {
+    const detail = JSON.stringify(result.data);
+    throw new Error(
+      overwrite
+        ? 'pine-facade save/new failed: ' + detail
+        : `pine-facade save/new failed (a script named "${copyName}" may already exist — pass overwrite:true to replace it): ${detail}`,
+    );
+  }
 
   const d = result?.data || {};
   const scriptId = d.scriptIdPart || d.id || d.script_id || null;
 
   // After save/new, the editor still points at the previous script; reopen
   // the new copy so subsequent pine_save writes back to the right identity.
-  // If the reopen fails, the save itself succeeded — surface the partial
-  // success instead of silently swallowing so callers can decide whether
-  // to retry or treat it as fatal.
+  // Reopen by the freshly-saved id when available — reopening by name can
+  // rebind to a DIFFERENT same-named script. Fall back to name only if the
+  // save response carried no id. If the reopen fails, the save itself
+  // succeeded — surface the partial success so callers can decide.
   let reopened = true;
   let reopenError = null;
   try {
-    await openScript({ name: copyName });
+    if (scriptId) await openScript({ id: scriptId, _deps });
+    else await openScript({ name: copyName, _deps });
   } catch (err) {
     reopened = false;
     reopenError = err.message;

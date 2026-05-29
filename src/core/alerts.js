@@ -285,6 +285,34 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  * Content-Type triggers a preflight OPTIONS that pricealerts.tradingview.com
  * rejects. The server happily parses the body without an explicit Content-Type.
  */
+// Reject webhook URLs that aren't plain http(s) or that target loopback /
+// link-local / private hosts. TradingView's servers POST to this URL when the
+// alert fires; an attacker-shaped value (e.g. a cloud metadata endpoint) would
+// turn alert creation into a server-side request the user never intended.
+function _assertSafeWebhook(web_hook) {
+  if (!web_hook) return;
+  let u;
+  try { u = new URL(web_hook); } catch { throw new Error(`web_hook is not a valid URL: ${web_hook}`); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error(`web_hook must be an http(s) URL, got "${u.protocol}".`);
+  }
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  // Note: URL() already canonicalizes decimal/hex IPv4 (2130706433, 0x7f000001)
+  // to dotted form, so the IPv4 regexes below catch those obfuscations. The
+  // gap is IPv4-mapped IPv6 (::ffff:169.254.169.254 → ::ffff:a9fe:a9fe), which
+  // no legitimate public webhook uses — reject the whole ::ffff: class.
+  const isPrivate =
+    host === 'localhost' || host === '0.0.0.0' || host === '::1' ||
+    host.startsWith('::ffff:') ||
+    /^127\./.test(host) || /^169\.254\./.test(host) ||
+    /^10\./.test(host) || /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    /^(fc|fd)[0-9a-f]{2}:/.test(host) || /^fe80:/.test(host);
+  if (isPrivate) {
+    throw new Error(`web_hook host "${u.hostname}" is loopback/link-local/private — not a valid public webhook target.`);
+  }
+}
+
 export async function createIndicator({
   pine_id,
   pine_version,
@@ -301,6 +329,7 @@ export async function createIndicator({
   active,
   _deps,
 } = {}) {
+  _assertSafeWebhook(web_hook);
   const { evaluate, evaluateAsync } = _resolve(_deps);
 
   if (!pine_id || typeof pine_id !== 'string') {

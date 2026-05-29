@@ -72,15 +72,19 @@ describe('getMultiTimeframe', () => {
     assert.equal(getCurrentTf(), 'D', 'should restore original TF');
   });
 
-  it('does not redundantly set TF when original is last in list', async () => {
-    const { deps, setCalls } = makeDeps({ startTf: 'D' });
+  it('always restores the original timeframe, even when it is last in the list', async () => {
+    const { deps, setCalls, getCurrentTf } = makeDeps({ startTf: 'D' });
     await getMultiTimeframe({
       timeframes: ['W', '60', 'D'],
       include_ohlcv: false,
       _deps: deps,
     });
-    assert.equal(setCalls[setCalls.length - 1], 'D');
-    assert.equal(setCalls.filter(t => t === 'D').length, 1, 'no extra restore call');
+    // Restore is unconditional now — the old "skip if original is last"
+    // optimization compared the requested string against TV's canonical
+    // resolution form and was unreliable (and skipped restore after a
+    // mid-loop failure). The redundant set is the deliberate trade-off.
+    assert.equal(setCalls[setCalls.length - 1], 'D', 'ends on the original TF');
+    assert.equal(getCurrentTf(), 'D', 'original TF restored');
   });
 
   it('captures errors per-timeframe without aborting the loop', async () => {

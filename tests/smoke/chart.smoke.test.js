@@ -308,8 +308,12 @@ describe('core/chart.js — smoke', () => {
 
   it('test_setTimeframe_smoke', async () => {
     const deps = {
-      evaluate: async () => undefined,
+      // setTimeframe now reads back chart.resolution() to report the actual
+      // resolution instead of echoing the requested string.
+      evaluate: async (expr) => (typeof expr === 'string' && /\.resolution\(\)/.test(expr) ? '5' : undefined),
       waitForChartReady: async () => true,
+      waitForStudiesReady: async () => true,
+      dismissBlockingDialogs: async () => [],
     };
     const r = await chart.setTimeframe({ timeframe: '5', _deps: deps });
     assert.equal(r.success, true);

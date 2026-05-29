@@ -210,7 +210,10 @@ export async function screenerScan({
   }
 
   const data = await response.json();
-  const rows = (data.data || []).map(row => formatRow(row, columns));
+  // Guard the response shape: data.data should be an array of rows. A
+  // non-array (object/null on a soft error) would make `|| []` pass an object
+  // straight into .map and throw, or silently misread.
+  const rows = (Array.isArray(data.data) ? data.data : []).map(row => formatRow(row, columns));
 
   return {
     success: true,

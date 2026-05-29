@@ -327,10 +327,17 @@ export async function autoplay({ speed, _deps } = {}) {
   const rp = await getReplayApi();
   const started = await evaluate(wv(`${rp}.isReplayStarted()`));
   if (!started) throw new Error('Replay is not started. Use replay_start first.');
+  const wasAutoplay = await evaluate(wv(`${rp}.isAutoplayStarted()`));
   if (speed > 0) {
+    // Adjust speed and ensure autoplay is ON. toggleAutoplay() flips state,
+    // so only toggle when it isn't already running — otherwise passing a
+    // speed to a running autoplay would stop it.
     await evaluate(`${rp}.changeAutoplayDelay(${speed})`);
+    if (!wasAutoplay) await evaluate(`${rp}.toggleAutoplay()`);
+  } else {
+    // No speed → plain toggle (start if stopped, pause if running).
+    await evaluate(`${rp}.toggleAutoplay()`);
   }
-  await evaluate(`${rp}.toggleAutoplay()`);
   const isAutoplay = await evaluate(wv(`${rp}.isAutoplayStarted()`));
   const currentDelay = await evaluate(wv(`${rp}.autoplayDelay()`));
   return { success: true, autoplay_active: !!isAutoplay, delay_ms: currentDelay };
