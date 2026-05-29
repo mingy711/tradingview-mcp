@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { boolish } from './_validation.js';
 import { jsonResult } from './_format.js';
 import * as core from '../core/alerts.js';
 
@@ -20,7 +21,7 @@ export function registerAlertTools(server) {
   server.tool('alert_delete', 'Delete one or more alerts via REST. Pass alert_id for one, alert_ids for bulk, or delete_all for everything.', {
     alert_id: z.coerce.number().optional().describe('Single alert id to delete (from alert_list).'),
     alert_ids: z.array(z.coerce.number()).optional().describe('Multiple alert ids to delete in one request.'),
-    delete_all: z.coerce.boolean().optional().describe('Delete every alert returned by alert_list.'),
+    delete_all: boolish.optional().describe('Delete every alert returned by alert_list.'),
   }, async ({ alert_id, alert_ids, delete_all }) => {
     try { return jsonResult(await core.deleteAlerts({ alert_id, alert_ids, delete_all })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
@@ -39,7 +40,7 @@ export function registerAlertTools(server) {
     web_hook: z.string().optional().describe('Webhook URL TV will POST the message to on fire. Omit for no webhook.'),
     frequency: z.string().optional().describe('"on_bar_close" (default), "once_per_bar", or "all".'),
     expiration_days: z.coerce.number().int().min(1).max(60).optional().describe('Days until auto-expiration (default 30, capped at 60).'),
-    active: z.coerce.boolean().optional().describe('Whether the alert starts active (default true).'),
+    active: boolish.optional().describe('Whether the alert starts active (default true).'),
   }, async (args) => {
     try { return jsonResult(await core.createIndicator(args)); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

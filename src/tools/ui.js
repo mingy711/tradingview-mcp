@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { boolish } from './_validation.js';
 import { jsonResult } from './_format.js';
 import * as core from '../core/ui.js';
 import { dismissBlockingDialogs } from '../core/dialog.js';
@@ -79,7 +80,7 @@ export function registerUiTools(server) {
     y: z.coerce.number().optional().describe('Y coordinate in DEVICE pixels (pre-scaled by devicePixelRatio). Omit when using selector.'),
     selector: z.string().optional().describe('CSS selector to click. Element\'s center is computed and devicePixelRatio-scaled internally. Preferred over raw coords.'),
     button: z.enum(['left', 'right', 'middle']).optional().describe('Mouse button (default left)'),
-    double_click: z.coerce.boolean().optional().describe('Double click (default false)'),
+    double_click: boolish.optional().describe('Double click (default false)'),
   }, async ({ x, y, selector, button, double_click }) => {
     try { return jsonResult(await core.mouseClick({ x, y, selector, button, double_click })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

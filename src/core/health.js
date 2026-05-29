@@ -551,7 +551,7 @@ export async function reconnect({ _deps } = {}) {
     };
   }
 
-  const chartReady = await waitForChartReady(null, null, 20000);
+  const chartReady = await waitForChartReady(null, 20000);
 
   try {
     const health = await healthCheck({ _deps });

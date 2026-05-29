@@ -1,7 +1,8 @@
-import { evaluate } from './connection.js';
+import { evaluate, KNOWN_PATHS } from './connection.js';
 
 const DEFAULT_TIMEOUT = 10000;
 const POLL_INTERVAL = 200;
+const CHART_API = KNOWN_PATHS.chartApi;
 
 // Loading-spinner probe shared by the chart waiters. Returns true while a
 // visible loader overlay is present. Single source for TV's loader selectors
@@ -63,7 +64,7 @@ const STUDY_SIGNATURE_JS = `
   })()
 `;
 
-export async function waitForChartReady(expectedSymbol = null, _expectedTf = null, timeout = DEFAULT_TIMEOUT) {
+export async function waitForChartReady(expectedSymbol = null, timeout = DEFAULT_TIMEOUT) {
   const start = Date.now();
   let lastBarCount = -1;
   let stableCount = 0;
@@ -142,32 +143,41 @@ export async function waitForChartRender(timeout = 5000) {
   let stable = 0;
 
   while (Date.now() - start < timeout) {
-    const state = await evaluate(`
-      (function() {
-        var canvas = document.querySelector('[data-name="pane-canvas"] canvas')
-          || document.querySelector('[data-name="pane-canvas"]')
-          || document.querySelector('canvas');
-        var rect = canvas ? canvas.getBoundingClientRect() : null;
+    let state;
+    try {
+      state = await evaluate(`
+        (function() {
+          var canvas = document.querySelector('[data-name="pane-canvas"] canvas')
+            || document.querySelector('[data-name="pane-canvas"]')
+            || document.querySelector('canvas');
+          var rect = canvas ? canvas.getBoundingClientRect() : null;
 
-        var symbol = '';
-        var resolution = '';
-        try {
-          var chart = window.TradingViewApi._activeChartWidgetWV.value();
-          symbol = chart.symbol();
-          resolution = chart.resolution();
-        } catch(e) {}
+          var symbol = '';
+          var resolution = '';
+          try {
+            var chart = ${CHART_API};
+            symbol = chart.symbol();
+            resolution = chart.resolution();
+          } catch(e) {}
 
-        return {
-          symbol: symbol,
-          resolution: resolution,
-          isLoading: ${IS_LOADING_JS},
-          canvasWidth: rect ? Math.round(rect.width) : 0,
-          canvasHeight: rect ? Math.round(rect.height) : 0,
-        };
-      })()
-    `);
+          return {
+            symbol: symbol,
+            resolution: resolution,
+            isLoading: ${IS_LOADING_JS},
+            canvasWidth: rect ? Math.round(rect.width) : 0,
+            canvasHeight: rect ? Math.round(rect.height) : 0,
+          };
+        })()
+      `);
+    } catch {
+      // A transient page/CDP throw during a remount is "not yet stable",
+      // not a fatal error — keep polling, like waitForStudiesReady.
+      state = null;
+    }
 
-    if (!state || state.isLoading || !state.canvasWidth || !state.canvasHeight) {
+    // Empty symbol means the chart-widget API didn't resolve this poll; treat
+    // it as not-ready so the signature can't stabilize on canvas dims alone.
+    if (!state || state.isLoading || !state.symbol || !state.canvasWidth || !state.canvasHeight) {
       stable = 0;
       await new Promise(r => setTimeout(r, POLL_INTERVAL));
       continue;

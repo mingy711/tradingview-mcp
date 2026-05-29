@@ -57,6 +57,10 @@ async function _addUserScript({ id, _deps }) {
     button_clicked: compile.button_clicked,
     pine_compile_errors: compile.errors || [],
     new_study_count: entityId ? 1 : 0,
+    slot_rebound: opened.slot_rebound,
+    // Surface openScript's unsafe-fallback warning rather than swallowing it:
+    // the open→compile sequence here is exactly what it cautions against.
+    ...(opened.warning && { pine_open_warning: opened.warning }),
     source: 'pine_facade_via_editor',
   };
 }
@@ -78,7 +82,7 @@ async function _hardReload({ getClient, disconnect, waitForChartReady }) {
   // 20s ceiling — TV with many studies + a slow data feed can take >10s
   // to repaint after reload. waitForChartReady polls until the loading
   // spinner clears and bar count stabilizes.
-  return await waitForChartReady(null, null, 20000);
+  return await waitForChartReady(null, 20000);
 }
 
 /**
@@ -347,7 +351,7 @@ export async function setTimeframe({ timeframe, _deps }) {
       chart.setResolution(${safeString(timeframe)}, {});
     })()
   `);
-  const ready = await waitForChartReady(null, timeframe);
+  const ready = await waitForChartReady(null);
   const studies_ready = await waitForStudiesReady();
   return { success: true, timeframe, chart_ready: ready, studies_ready };
 }

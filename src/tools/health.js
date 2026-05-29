@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { boolish } from './_validation.js';
 import { jsonResult } from './_format.js';
 import * as core from '../core/health.js';
 
@@ -20,7 +21,7 @@ export function registerHealthTools(server) {
 
   server.tool('tv_launch', 'Launch TradingView Desktop with Chrome DevTools Protocol (remote debugging) enabled. Auto-detects install location on Mac, Windows, Linux, and Windows MSIX (Microsoft Store) on native or WSL.', {
     port: z.coerce.number().optional().describe('CDP port (default: matches the MCP server\'s configured port, env TV_CDP_PORT or 9222). Passing a non-default port launches TV on that port but the MCP server cannot talk to it without TV_CDP_PORT and a restart.'),
-    kill_existing: z.coerce.boolean().optional().describe('Kill existing TradingView instances first (default true)'),
+    kill_existing: boolish.optional().describe('Kill existing TradingView instances first (default true)'),
   }, async ({ port, kill_existing }) => {
     try { return jsonResult(await core.launch({ port, kill_existing })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

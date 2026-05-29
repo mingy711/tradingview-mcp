@@ -19,18 +19,16 @@ function _resolve(deps) {
 
 export async function captureScreenshot({ region, filename, method, output_dir, wait_for_render, _deps } = {}) {
   const { evaluate, getChartCollection, withReconnect, waitForChartRender } = _resolve(_deps);
-  const targetDir = resolveScreenshotDir(output_dir);
 
   // Opt-in stabilizer for callers that just changed symbol/timeframe and
   // would otherwise capture the previous frame. Default off because most
   // callers shoot a known-stable chart and don't want the extra latency.
+  // renderStable: null = not requested, true = stabilized, false = timed out.
+  let renderStable = null;
   if (wait_for_render) {
-    await waitForChartRender();
+    renderStable = await waitForChartRender();
   }
-
-  const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const fname = (filename || `tv_${region || 'full'}_${ts}`).replace(/[/\\]/g, '_');
-  const filePath = join(targetDir, `${fname}.png`);
+  const renderTimedOut = renderStable === false;
 
   if (method === 'api') {
     try {
@@ -39,12 +37,20 @@ export async function captureScreenshot({ region, filename, method, output_dir, 
       return {
         success: true, method: 'api',
         waited_for_render: !!wait_for_render,
+        ...(renderTimedOut && { render_stabilized: false, render_note: 'wait_for_render timed out before the chart stabilized; the frame may be mid-repaint' }),
         note: 'takeScreenshot() triggered — TradingView will save/show the screenshot via its own UI',
       };
     } catch {
       // Fall through to CDP method
     }
   }
+
+  // Resolve the save path only on the CDP path — the api path above never
+  // writes a file, so it shouldn't create (or fail validating) a directory.
+  const targetDir = resolveScreenshotDir(output_dir);
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const fname = (filename || `tv_${region || 'full'}_${ts}`).replace(/[/\\]/g, '_');
+  const filePath = join(targetDir, `${fname}.png`);
 
   let clip = undefined;
 
@@ -82,6 +88,7 @@ export async function captureScreenshot({ region, filename, method, output_dir, 
   return {
     success: true, method: 'cdp', file_path: filePath, region,
     waited_for_render: !!wait_for_render,
+    ...(renderTimedOut && { render_stabilized: false, render_note: 'wait_for_render timed out before the chart stabilized; the frame may be mid-repaint' }),
     size_bytes: Buffer.from(data, 'base64').length,
   };
 }

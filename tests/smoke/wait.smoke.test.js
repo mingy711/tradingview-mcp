@@ -15,7 +15,7 @@ describe('wait.js — smoke', () => {
     installCdpMocks({
       evaluate: async () => ({ isLoading: false, barCount: 50, currentSymbol: 'AAPL' }),
     });
-    assert.equal(await waitForChartReady('AAPL', null, 2000), true);
+    assert.equal(await waitForChartReady('AAPL', 2000), true);
   });
 
   it('test_waitForChartReady_smoke_timeout', async () => {
@@ -23,7 +23,7 @@ describe('wait.js — smoke', () => {
     installCdpMocks({
       evaluate: async () => ({ isLoading: true, barCount: 0, currentSymbol: '' }),
     });
-    assert.equal(await waitForChartReady(null, null, 400), false);
+    assert.equal(await waitForChartReady(null, 400), false);
   });
 
   it('test_waitForChartReady_smoke_symbolMismatch', async () => {
@@ -31,6 +31,6 @@ describe('wait.js — smoke', () => {
     installCdpMocks({
       evaluate: async () => ({ isLoading: false, barCount: 100, currentSymbol: 'MSFT' }),
     });
-    assert.equal(await waitForChartReady('AAPL', null, 400), false);
+    assert.equal(await waitForChartReady('AAPL', 400), false);
   });
 });

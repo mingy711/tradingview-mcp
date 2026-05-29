@@ -913,7 +913,7 @@ export async function openScript({ name, id, _deps }) {
           }
 
           var id = match.scriptIdPart;
-          var ver = match.version || 1;
+          var ver = (match.version == null) ? 1 : match.version;
           return fetch('https://pine-facade.tradingview.com/pine-facade/get/' + id + '/' + ver, { credentials: 'include' })
             .then(function(r2) { return r2.json(); })
             .then(function(data) {
@@ -958,21 +958,26 @@ export async function openScript({ name, id, _deps }) {
     })()
   `);
 
-  if (result?.error) {
+  if (!result) {
+    throw new Error('openScript: no result returned from page (CDP returned undefined — possibly a dropped or oversized response).');
+  }
+  if (result.error) {
     throw new Error(result.error);
   }
 
-  return {
+  const out = {
     success: true,
     name: result.name,
     script_id: result.id,
     version: result.version,
     lines: result.lines,
     slot_rebound: result.slot_rebound,
-    warning: result.warning,
     source: 'internal_api',
     opened: true,
   };
+  // warning only set on the unsafe setValue fallback; omit it on the safe path.
+  if (result.warning) out.warning = result.warning;
+  return out;
 }
 
 export async function listScripts({ _deps } = {}) {
