@@ -6,6 +6,20 @@ import { join } from 'node:path';
 
 const THIS_HOST = hostname();
 
+// A PID guaranteed to be dead on THIS machine. A hardcoded "big unlikely"
+// literal is unsafe: on a box with a high pid_max and many processes (e.g. a
+// WSL2 host), it can collide with a live process — observed 999999 running as
+// an nginx worker, where process.kill(pid, 0) returns EPERM (not ESRCH), so
+// isAlive() correctly kept it and the prune assertions failed. Probe down from
+// pid_max for a PID that actually returns ESRCH (no such process).
+function findDeadPid() {
+  for (let pid = 4194303, tries = 0; pid > 1 && tries < 5000; pid--, tries++) {
+    try { process.kill(pid, 0); } catch (e) { if (e.code === 'ESRCH') return pid; }
+  }
+  throw new Error('pin_registry smoke: could not find a guaranteed-dead PID');
+}
+const DEAD_PID = findDeadPid();
+
 // Pin a unique registry path BEFORE importing the module so the
 // module-level constant captures our temp path. Each test then clears
 // the file body to isolate state.
@@ -64,7 +78,7 @@ describe('core/pin_registry.js — smoke', () => {
   });
 
   it('claim() prunes dead-PID entries from registry on read', async () => {
-    const deadPid = 999999;  // very unlikely to be live
+    const deadPid = DEAD_PID;
     writeFileSync(process.env.TV_MCP_REGISTRY_PATH, JSON.stringify({
       version: 1,
       pins: { dead_target: { pid: deadPid, host: THIS_HOST, claimedAt: 1 } },
@@ -117,7 +131,7 @@ describe('core/pin_registry.js — smoke', () => {
   it('list() prunes dead PIDs and marks our entries with mine:true', async () => {
     await registry.claim('mine');
     const reg = JSON.parse(readFileSync(process.env.TV_MCP_REGISTRY_PATH, 'utf8'));
-    reg.pins.dead = { pid: 999999, host: THIS_HOST, claimedAt: 1 };
+    reg.pins.dead = { pid: DEAD_PID, host: THIS_HOST, claimedAt: 1 };
     reg.pins.theirs = { pid: process.ppid, host: THIS_HOST, claimedAt: 1 };
     writeFileSync(process.env.TV_MCP_REGISTRY_PATH, JSON.stringify(reg));
 
