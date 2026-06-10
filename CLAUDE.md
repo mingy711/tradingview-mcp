@@ -73,6 +73,13 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 - `alert_list` → view active alerts
 - `alert_delete` → remove alerts
 
+### "Manage watchlists"
+- `watchlist_get` → read symbols from the current watchlist
+- `watchlist_add` → add one symbol to the current watchlist
+- `watchlist_upload` → import/upload a TradingView watchlist text file
+- `watchlist_delete` → delete an entire watchlist by name
+- `watchlist_get_share_link` → get a shareable link for a watchlist (enables sharing if needed)
+
 ### "Navigate the UI"
 - `ui_open_panel` → open/close pine-editor, strategy-tester, watchlist, alerts, trading
 - `ui_click` → click buttons by aria-label, text, or data-name

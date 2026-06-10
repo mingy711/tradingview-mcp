@@ -23,4 +23,25 @@ export function registerWatchlistTools(server) {
       return jsonResult({ success: false, error: err.message }, true);
     }
   });
+
+  server.tool('watchlist_upload', 'Upload/import a local TradingView watchlist text file using the Watchlist Upload list UI', {
+    filePath: z.string().describe('Path to a TradingView watchlist .txt file to import/upload'),
+  }, async ({ filePath }) => {
+    try { return jsonResult(await core.upload({ filePath })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('watchlist_delete', 'Delete a watchlist by name', {
+    watchlistName: z.string().describe('Name of the watchlist to delete (e.g., "sniper_master_watchlist")'),
+  }, async ({ watchlistName }) => {
+    try { return jsonResult(await core.delete_({ watchlistName })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('watchlist_get_share_link', 'Get a shareable link (URL) for a watchlist, enabling sharing for it if not already on', {
+    watchlistName: z.string().optional().describe('Name of the watchlist to share. Defaults to the currently active watchlist.'),
+  }, async ({ watchlistName }) => {
+    try { return jsonResult(await core.getShareLink({ watchlistName })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
 }
