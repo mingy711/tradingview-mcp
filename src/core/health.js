@@ -5,6 +5,13 @@ import { getClient, getTargetInfo, evaluate } from '../connection.js';
 import { existsSync } from 'fs';
 import { execSync, spawn } from 'child_process';
 
+const DEFAULT_NETWORK_TIMEOUT_MS = 5000;
+const TRADINGVIEW_NETWORK_ENDPOINTS = [
+  'https://data.tradingview.com/ping',
+  'https://symbol-search.tradingview.com/symbol_search/v3/?text=AAPL&hl=1&exchange=&lang=en&search_type=&domain=production',
+  'https://pine-facade.tradingview.com/pine-facade/list/?filter=saved',
+];
+
 export async function healthCheck() {
   await getClient();
   const target = await getTargetInfo();
@@ -39,6 +46,61 @@ export async function healthCheck() {
     chart_resolution: state?.resolution || 'unknown',
     chart_type: state?.chartType ?? null,
     api_available: state?.apiAvailable ?? false,
+  };
+}
+
+export async function networkCheck({ timeout_ms } = {}) {
+  const timeout = Number(timeout_ms) || DEFAULT_NETWORK_TIMEOUT_MS;
+  const checked_at = new Date().toISOString();
+  const results = [];
+
+  for (const url of TRADINGVIEW_NETWORK_ENDPOINTS) {
+    const started = Date.now();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Origin': 'https://www.tradingview.com',
+          'Referer': 'https://www.tradingview.com/',
+          'User-Agent': 'tradingview-mcp-network-check/1.0',
+        },
+        signal: controller.signal,
+      });
+
+      results.push({
+        url,
+        ok: response.ok,
+        status: response.status,
+        status_text: response.statusText,
+        elapsed_ms: Date.now() - started,
+      });
+    } catch (err) {
+      results.push({
+        url,
+        ok: false,
+        error: err.name === 'AbortError' ? 'timeout' : err.message,
+        elapsed_ms: Date.now() - started,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  const dataPing = results.find(r => r.url === 'https://data.tradingview.com/ping');
+  const success = results.some(r => r.ok);
+
+  return {
+    success,
+    checked_at,
+    timeout_ms: timeout,
+    data_ping_ok: !!dataPing?.ok,
+    results,
+    hint: dataPing?.ok
+      ? 'data.tradingview.com/ping is reachable from this machine. If TradingView still logs failures, check the app session, proxy, VPN, or firewall rules specific to TradingView Desktop.'
+      : 'data.tradingview.com/ping is not reachable from this machine. Check DNS, VPN/proxy, firewall, captive portal, or TradingView service availability.',
   };
 }
 

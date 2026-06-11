@@ -12,6 +12,18 @@ export function registerAlertTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  server.tool('alert_create_for_watchlist', 'Create an alert that applies to every symbol on a watchlist, optionally driven by a custom Pine indicator alertcondition() instead of "Price"', {
+    watchlistName: z.string().optional().describe('Watchlist name (defaults to the currently active watchlist)'),
+    study: z.string().optional().describe('Condition source — substring of an indicator name on the chart (defaults to "Price")'),
+    alertCondition: z.string().optional().describe('alertcondition() option to select — substring match (e.g., "Entry Zone")'),
+    message: z.string().optional().describe('Custom alert message'),
+    alertName: z.string().optional().describe('Custom alert name'),
+    trigger: z.string().optional().describe('Trigger frequency: "Only Once", "Once Per Bar", "Once Per Bar Close", or "Every time" (defaults to "Only Once")'),
+  }, async ({ watchlistName, study, alertCondition, message, alertName, trigger }) => {
+    try { return jsonResult(await core.createForWatchlist({ watchlistName, study, alertCondition, message, alertName, trigger })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   server.tool('alert_list', 'List active alerts', {}, async () => {
     try { return jsonResult(await core.list()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

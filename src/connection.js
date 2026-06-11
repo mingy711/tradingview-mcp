@@ -38,6 +38,26 @@ export function safeString(str) {
 }
 
 /**
+ * Dispatch a real (trusted) mouse click at the given viewport coordinates.
+ * Some browser APIs (file choosers, clipboard writes) silently no-op on a
+ * synthetic element.click() because they require user-activation — this
+ * produces a click the browser treats as a genuine user gesture.
+ */
+export async function dispatchClick(c, x, y) {
+  await c.Input.dispatchMouseEvent({ type: 'mouseMoved', x, y });
+  await c.Input.dispatchMouseEvent({ type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+  await c.Input.dispatchMouseEvent({ type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+}
+
+/**
+ * Dispatch an Escape key press (close menus/dialogs).
+ */
+export async function dispatchEscape(c) {
+  await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+}
+
+/**
  * Validate that a value is a finite number. Throws if NaN, Infinity, or non-numeric.
  * Prevents corrupt values from reaching TradingView APIs that persist to cloud state.
  */

@@ -8,6 +8,13 @@ export function registerHealthTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message, hint: 'TradingView is not running with CDP enabled. Use the tv_launch tool to start it automatically.' }, true); }
   });
 
+  server.tool('tv_network_check', 'Check whether this machine can reach TradingView data endpoints used by the app and MCP tools', {
+    timeout_ms: z.coerce.number().optional().describe('Per-request timeout in milliseconds (default 5000)'),
+  }, async ({ timeout_ms }) => {
+    try { return jsonResult(await core.networkCheck({ timeout_ms })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   server.tool('tv_discover', 'Report which known TradingView API paths are available and their methods', {}, async () => {
     try { return jsonResult(await core.discover()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

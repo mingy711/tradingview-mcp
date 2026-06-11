@@ -2,8 +2,92 @@
  * Core watchlist logic.
  * Uses TradingView's internal widget API with DOM fallback.
  */
-import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js';
+import { evaluate, evaluateAsync, getClient, safeString, dispatchClick, dispatchEscape } from '../connection.js';
 import { realpath } from 'node:fs/promises';
+
+/**
+ * Ensure the right-hand Watchlist/details/news panel is open.
+ */
+export async function ensureWatchlistPanelOpen() {
+  const panelState = await evaluate(`
+    (function() {
+      var btn = document.querySelector('[data-name="base-watchlist-widget-button"]')
+        || document.querySelector('[aria-label*="Watchlist"]');
+      if (!btn) return { error: 'Watchlist button not found' };
+      var isActive = btn.getAttribute('aria-pressed') === 'true'
+        || /(?:^|\\s)(?:is)?[Aa]ctive-/.test(btn.className);
+      if (!isActive) { btn.click(); return { opened: true }; }
+      return { opened: false };
+    })()
+  `);
+
+  if (panelState?.error) throw new Error(panelState.error);
+  if (panelState?.opened) await new Promise(r => setTimeout(r, 500));
+  return panelState;
+}
+
+/**
+ * Open the "Watchlist" dropdown menu (top-right of the watchlist panel).
+ */
+export async function openWatchlistMenu() {
+  const menuOpened = await evaluate(`
+    (function() {
+      var btn = document.querySelector('[data-name="watchlists-button"]');
+      if (!btn) return { error: 'Watchlist menu button not found' };
+      btn.click();
+      return { opened: true };
+    })()
+  `);
+
+  if (menuOpened?.error) throw new Error(menuOpened.error);
+  await new Promise(r => setTimeout(r, 300));
+}
+
+/**
+ * Switch to the named watchlist if it isn't already active. Selecting a
+ * watchlist from the dropdown closes the menu, so it is reopened afterward.
+ */
+export async function switchToWatchlist(watchlistName) {
+  if (!watchlistName) return { switched: false };
+
+  const switched = await evaluate(`
+    (function() {
+      var btn = document.querySelector('[data-name="watchlists-button"]');
+      if (btn && btn.textContent.trim() === ${safeString(watchlistName)}) return { active: true };
+      var menu = document.querySelector('.menuBox-XktvVkFF');
+      if (!menu) return { error: 'Watchlist dropdown menu not found' };
+      var rows = menu.querySelectorAll('[role="row"]');
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i].textContent.trim() === ${safeString(watchlistName)}) {
+          rows[i].click();
+          return { switched: true };
+        }
+      }
+      return { error: 'Watchlist "' + ${safeString(watchlistName)} + '" not found in menu' };
+    })()
+  `);
+
+  if (switched?.error) throw new Error(switched.error);
+
+  if (switched?.switched) {
+    await new Promise(r => setTimeout(r, 500));
+    await openWatchlistMenu();
+  }
+
+  return switched;
+}
+
+/**
+ * Read the name of the currently active watchlist from the dropdown button.
+ */
+export async function getActiveWatchlistName() {
+  return evaluate(`
+    (function() {
+      var btn = document.querySelector('[data-name="watchlists-button"]');
+      return btn ? btn.textContent.trim() : null;
+    })()
+  `);
+}
 
 export async function get() {
   // Try internal API first — reads from the active watchlist widget
@@ -67,22 +151,7 @@ export async function add({ symbol }) {
   // Use keyboard shortcut to open symbol search in watchlist, type symbol, press Enter
   const c = await getClient();
 
-  // First ensure watchlist panel is open
-  const panelState = await evaluate(`
-    (function() {
-      var btn = document.querySelector('[data-name="base-watchlist-widget-button"]')
-        || document.querySelector('[aria-label*="Watchlist"]');
-      if (!btn) return { error: 'Watchlist button not found' };
-      var isActive = btn.getAttribute('aria-pressed') === 'true'
-        || btn.classList.toString().indexOf('Active') !== -1
-        || btn.classList.toString().indexOf('active') !== -1;
-      if (!isActive) { btn.click(); return { opened: true }; }
-      return { opened: false };
-    })()
-  `);
-
-  if (panelState?.error) throw new Error(panelState.error);
-  if (panelState?.opened) await new Promise(r => setTimeout(r, 500));
+  await ensureWatchlistPanelOpen();
 
   // Click the "Add symbol" button (various selectors)
   const addClicked = await evaluate(`
@@ -126,8 +195,7 @@ export async function add({ symbol }) {
   await new Promise(r => setTimeout(r, 300));
 
   // Press Escape to close search
-  await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Escape', code: 'Escape' });
+  await dispatchEscape(c);
 
   return { success: true, symbol, action: 'added' };
 }
@@ -138,22 +206,7 @@ export async function upload({ filePath }) {
   const absolutePath = await realpath(filePath);
   const c = await getClient();
 
-  // Ensure watchlist panel is open.
-  const panelState = await evaluate(`
-    (function() {
-      var btn = document.querySelector('[data-name="base-watchlist-widget-button"]')
-        || document.querySelector('[aria-label*="Watchlist"]');
-      if (!btn) return { error: 'Watchlist button not found' };
-      var isActive = btn.getAttribute('aria-pressed') === 'true'
-        || btn.classList.toString().indexOf('Active') !== -1
-        || btn.classList.toString().indexOf('active') !== -1;
-      if (!isActive) { btn.click(); return { opened: true }; }
-      return { opened: false };
-    })()
-  `);
-
-  if (panelState?.error) throw new Error(panelState.error);
-  if (panelState?.opened) await new Promise(r => setTimeout(r, 500));
+  await ensureWatchlistPanelOpen();
 
   await c.Page.setInterceptFileChooserDialog({ enabled: true });
   let fileChooser;
@@ -162,17 +215,7 @@ export async function upload({ filePath }) {
   });
 
   try {
-    const menuOpened = await evaluate(`
-      (function() {
-        var btn = document.querySelector('[data-name="watchlists-button"]');
-        if (!btn) return { error: 'Watchlist menu button not found' };
-        btn.click();
-        return { opened: true };
-      })()
-    `);
-
-    if (menuOpened?.error) throw new Error(menuOpened.error);
-    await new Promise(r => setTimeout(r, 300));
+    await openWatchlistMenu();
 
     const importRow = await evaluate(`
       (function() {
@@ -196,10 +239,7 @@ export async function upload({ filePath }) {
     // Dispatch a real (trusted) mouse click so the browser treats it as a user
     // gesture — a synthetic element.click() does not have enough activation to
     // open the file chooser, so Page.fileChooserOpened never fires.
-    const { x, y } = importRow;
-    await c.Input.dispatchMouseEvent({ type: 'mouseMoved', x, y });
-    await c.Input.dispatchMouseEvent({ type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-    await c.Input.dispatchMouseEvent({ type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+    await dispatchClick(c, importRow.x, importRow.y);
 
     fileChooser = await Promise.race([
       fileChooserPromise,
@@ -232,35 +272,8 @@ export async function upload({ filePath }) {
 export async function delete_({ watchlistName }) {
   const c = await getClient();
 
-  // Ensure watchlist panel is open
-  const panelState = await evaluate(`
-    (function() {
-      var btn = document.querySelector('[data-name="base-watchlist-widget-button"]')
-        || document.querySelector('[aria-label*="Watchlist"]');
-      if (!btn) return { error: 'Watchlist button not found' };
-      var isActive = btn.getAttribute('aria-pressed') === 'true'
-        || btn.classList.toString().indexOf('Active') !== -1
-        || btn.classList.toString().indexOf('active') !== -1;
-      if (!isActive) { btn.click(); return { opened: true }; }
-      return { opened: false };
-    })()
-  `);
-
-  if (panelState?.error) throw new Error(panelState.error);
-  if (panelState?.opened) await new Promise(r => setTimeout(r, 500));
-
-  // Open the "Watchlist" dropdown menu (top-right of the watchlist panel)
-  const menuOpened = await evaluate(`
-    (function() {
-      var btn = document.querySelector('[data-name="watchlists-button"]');
-      if (!btn) return { error: 'Watchlist menu button not found' };
-      btn.click();
-      return { opened: true };
-    })()
-  `);
-
-  if (menuOpened?.error) throw new Error(menuOpened.error);
-  await new Promise(r => setTimeout(r, 300));
+  await ensureWatchlistPanelOpen();
+  await openWatchlistMenu();
 
   // Click "Open list..." to bring up the Watchlists manager dialog
   const openListClicked = await evaluate(`
@@ -301,8 +314,7 @@ export async function delete_({ watchlistName }) {
 
   if (removeClicked?.error) {
     // Close the manager dialog before surfacing the error
-    await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
-    await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await dispatchEscape(c);
     throw new Error(removeClicked.error);
   }
 
@@ -326,8 +338,7 @@ export async function delete_({ watchlistName }) {
   await new Promise(r => setTimeout(r, 300));
 
   // Close the Watchlists manager dialog
-  await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await dispatchEscape(c);
 
   return { success: true, watchlistName, action: 'deleted' };
 }
@@ -335,64 +346,9 @@ export async function delete_({ watchlistName }) {
 export async function getShareLink({ watchlistName } = {}) {
   const c = await getClient();
 
-  // Ensure watchlist panel is open
-  const panelState = await evaluate(`
-    (function() {
-      var btn = document.querySelector('[data-name="base-watchlist-widget-button"]')
-        || document.querySelector('[aria-label*="Watchlist"]');
-      if (!btn) return { error: 'Watchlist button not found' };
-      var isActive = btn.getAttribute('aria-pressed') === 'true'
-        || btn.classList.toString().indexOf('Active') !== -1
-        || btn.classList.toString().indexOf('active') !== -1;
-      if (!isActive) { btn.click(); return { opened: true }; }
-      return { opened: false };
-    })()
-  `);
-
-  if (panelState?.error) throw new Error(panelState.error);
-  if (panelState?.opened) await new Promise(r => setTimeout(r, 500));
-
-  // Open the "Watchlist" dropdown menu (top-right of the watchlist panel)
-  const menuOpened = await evaluate(`
-    (function() {
-      var btn = document.querySelector('[data-name="watchlists-button"]');
-      if (!btn) return { error: 'Watchlist menu button not found' };
-      btn.click();
-      return { opened: true };
-    })()
-  `);
-
-  if (menuOpened?.error) throw new Error(menuOpened.error);
-  await new Promise(r => setTimeout(r, 300));
-
-  // Switch to the requested watchlist if it isn't already the active one
-  if (watchlistName) {
-    const switched = await evaluate(`
-      (function() {
-        var btn = document.querySelector('[data-name="watchlists-button"]');
-        if (btn && btn.textContent.trim() === ${safeString(watchlistName)}) return { active: true };
-        var menu = document.querySelector('.menuBox-XktvVkFF');
-        if (!menu) return { error: 'Watchlist dropdown menu not found' };
-        var rows = menu.querySelectorAll('[role="row"]');
-        for (var i = 0; i < rows.length; i++) {
-          if (rows[i].textContent.trim() === ${safeString(watchlistName)}) {
-            rows[i].click();
-            return { switched: true };
-          }
-        }
-        return { error: 'Watchlist "' + ${safeString(watchlistName)} + '" not found in menu' };
-      })()
-    `);
-
-    if (switched?.error) throw new Error(switched.error);
-
-    if (switched?.switched) {
-      await new Promise(r => setTimeout(r, 500));
-      // Switching closes the menu — reopen it for the now-active watchlist
-      await evaluate(`document.querySelector('[data-name="watchlists-button"]').click()`);
-      await new Promise(r => setTimeout(r, 300));
-    }
-  }
+  await ensureWatchlistPanelOpen();
+  await openWatchlistMenu();
+  await switchToWatchlist(watchlistName);
 
   // "Copy link..." only appears once "Share list" is toggled on
   const shareState = await evaluate(`
@@ -414,9 +370,7 @@ export async function getShareLink({ watchlistName } = {}) {
 
   let sharingEnabled = false;
   if (!shareState.checked) {
-    await c.Input.dispatchMouseEvent({ type: 'mouseMoved', x: shareState.x, y: shareState.y });
-    await c.Input.dispatchMouseEvent({ type: 'mousePressed', x: shareState.x, y: shareState.y, button: 'left', clickCount: 1 });
-    await c.Input.dispatchMouseEvent({ type: 'mouseReleased', x: shareState.x, y: shareState.y, button: 'left', clickCount: 1 });
+    await dispatchClick(c, shareState.x, shareState.y);
     await new Promise(r => setTimeout(r, 600));
     sharingEnabled = true;
   }
@@ -441,28 +395,20 @@ export async function getShareLink({ watchlistName } = {}) {
 
   // Dispatch a real (trusted) mouse click — clipboard writes require user
   // activation, so a synthetic element.click() silently does nothing.
-  await c.Input.dispatchMouseEvent({ type: 'mouseMoved', x: copyRow.x, y: copyRow.y });
-  await c.Input.dispatchMouseEvent({ type: 'mousePressed', x: copyRow.x, y: copyRow.y, button: 'left', clickCount: 1 });
-  await c.Input.dispatchMouseEvent({ type: 'mouseReleased', x: copyRow.x, y: copyRow.y, button: 'left', clickCount: 1 });
+  await dispatchClick(c, copyRow.x, copyRow.y);
   await new Promise(r => setTimeout(r, 500));
 
   await c.Browser.grantPermissions({ permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
   const shareLink = await evaluateAsync('navigator.clipboard.readText()');
 
   // Close the dropdown menu
-  await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await dispatchEscape(c);
 
   if (!shareLink || !/^https?:\/\//.test(shareLink)) {
     throw new Error('Failed to read share link from clipboard');
   }
 
-  const activeName = await evaluate(`
-    (function() {
-      var btn = document.querySelector('[data-name="watchlists-button"]');
-      return btn ? btn.textContent.trim() : null;
-    })()
-  `);
+  const activeName = await getActiveWatchlistName();
 
   return { success: true, watchlistName: activeName, shareLink, sharingEnabled };
 }
