@@ -14,6 +14,12 @@ import { registerWatchlistTools } from './tools/watchlist.js';
 import { registerUiTools } from './tools/ui.js';
 import { registerPaneTools } from './tools/pane.js';
 import { registerTabTools } from './tools/tab.js';
+import { registerHotlistTools } from './tools/hotlist.js';
+import { registerStrategyTools } from './tools/strategy.js';
+import { registerNewsTools } from './tools/news.js';
+import { registerScreenerTools } from './tools/screener.js';
+import { registerPineDeployTools } from './tools/pine-deploy.js';
+import { registerPinePublishTools } from './tools/pine-publish.js';
 
 const server = new McpServer(
   {
@@ -55,8 +61,8 @@ Screenshots: capture_screenshot → regions: "full", "chart", "strategy_tester"
 Replay: replay_start → replay_step → replay_trade → replay_status → replay_stop
 Batch: batch_run → run action across multiple symbols/timeframes
 Drawing: draw_shape → horizontal_line, trend_line, rectangle, text
-Alerts: alert_create, alert_create_for_watchlist, alert_list, alert_delete
-Watchlists: watchlist_get, watchlist_add, watchlist_upload, watchlist_delete, watchlist_get_share_link
+Alerts: alert_create, alert_create_for_watchlist, alert_create_indicator, alert_list, alert_delete
+Watchlists: watchlist_get, watchlist_add, watchlist_add_bulk, watchlist_remove, watchlist_upload, watchlist_delete, watchlist_get_share_link
 Launch: tv_launch → auto-detect and start TradingView with CDP on any platform
 Panes: pane_list, pane_set_layout (s, 2h, 2v, 4, 6, 8), pane_focus, pane_set_symbol
 Tabs: tab_list, tab_new, tab_close, tab_switch
@@ -85,10 +91,39 @@ registerWatchlistTools(server);
 registerUiTools(server);
 registerPaneTools(server);
 registerTabTools(server);
+registerHotlistTools(server);
+registerStrategyTools(server);
+registerNewsTools(server);
+registerScreenerTools(server);
+registerPineDeployTools(server);
+registerPinePublishTools(server);
 
 // Startup notice (stderr so it doesn't interfere with MCP stdio protocol)
 process.stderr.write('⚠  tradingview-mcp  |  Unofficial tool. Not affiliated with TradingView Inc. or Anthropic.\n');
 process.stderr.write('   Ensure your usage complies with TradingView\'s Terms of Use.\n\n');
+
+// Graceful shutdown: when the MCP host (Claude Code, Tauri sidecar, etc.)
+// kills us via SIGTERM, dev Ctrl-C sends SIGINT, or stdin EOF when the
+// parent process drops the pipe — close the CDP WebSocket cleanly so
+// TradingView doesn't see a dangling connection. Pairs with the
+// no-Runtime.enable change in connection.js to eliminate the EPIPE-on-
+// TV-close crash.
+import { disconnect as disconnectCdp, setGracefulShutdownOwner } from './connection.js';
+// Claim ownership of graceful shutdown so the registry's signal handlers
+// don't process.exit() out from under our async CDP teardown below.
+setGracefulShutdownOwner();
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  process.stderr.write(`tradingview-mcp shutting down (${signal})\n`);
+  try { await disconnectCdp(); } catch { /* ignore */ }
+  process.exit(0);
+}
+process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+process.on('SIGINT',  () => { void shutdown('SIGINT'); });
+process.stdin.on('end',   () => { void shutdown('stdin-end'); });
+process.stdin.on('close', () => { void shutdown('stdin-close'); });
 
 // Start stdio transport
 const transport = new StdioServerTransport();

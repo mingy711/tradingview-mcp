@@ -2,20 +2,38 @@
  * Core watchlist logic.
  * Uses TradingView's internal widget API with DOM fallback.
  */
-import { evaluate, evaluateAsync, getClient, safeString, dispatchClick, dispatchEscape } from '../connection.js';
 import { realpath } from 'node:fs/promises';
+import {
+  dispatchClick,
+  dispatchEscape,
+  evaluate as _evaluate,
+  evaluateAsync as _evaluateAsync,
+  getClient as _getClient,
+  safeString,
+} from '../connection.js';
+
+function _resolve(deps) {
+  return {
+    evaluate: deps?.evaluate || _evaluate,
+    evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
+    getClient: deps?.getClient || _getClient,
+  };
+}
 
 /**
  * Ensure the right-hand Watchlist/details/news panel is open.
  */
-export async function ensureWatchlistPanelOpen() {
+export async function ensureWatchlistPanelOpen({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const panelState = await evaluate(`
     (function() {
       var btn = document.querySelector('[data-name="base-watchlist-widget-button"]')
         || document.querySelector('[aria-label*="Watchlist"]');
       if (!btn) return { error: 'Watchlist button not found' };
       var isActive = btn.getAttribute('aria-pressed') === 'true'
-        || /(?:^|\\s)(?:is)?[Aa]ctive-/.test(btn.className);
+        || /(?:^|\\s)(?:is)?[Aa]ctive-/.test(btn.className)
+        || btn.classList.toString().indexOf('Active') !== -1
+        || btn.classList.toString().indexOf('active') !== -1;
       if (!isActive) { btn.click(); return { opened: true }; }
       return { opened: false };
     })()
@@ -27,9 +45,10 @@ export async function ensureWatchlistPanelOpen() {
 }
 
 /**
- * Open the "Watchlist" dropdown menu (top-right of the watchlist panel).
+ * Open the Watchlist dropdown menu at the top of the watchlist panel.
  */
-export async function openWatchlistMenu() {
+export async function openWatchlistMenu({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const menuOpened = await evaluate(`
     (function() {
       var btn = document.querySelector('[data-name="watchlists-button"]');
@@ -41,14 +60,15 @@ export async function openWatchlistMenu() {
 
   if (menuOpened?.error) throw new Error(menuOpened.error);
   await new Promise(r => setTimeout(r, 300));
+  return menuOpened;
 }
 
 /**
- * Switch to the named watchlist if it isn't already active. Selecting a
- * watchlist from the dropdown closes the menu, so it is reopened afterward.
+ * Switch to the named watchlist if it is not already active.
  */
-export async function switchToWatchlist(watchlistName) {
+export async function switchToWatchlist(watchlistName, { _deps } = {}) {
   if (!watchlistName) return { switched: false };
+  const { evaluate } = _resolve(_deps);
 
   const switched = await evaluate(`
     (function() {
@@ -68,19 +88,18 @@ export async function switchToWatchlist(watchlistName) {
   `);
 
   if (switched?.error) throw new Error(switched.error);
-
   if (switched?.switched) {
     await new Promise(r => setTimeout(r, 500));
-    await openWatchlistMenu();
+    await openWatchlistMenu({ _deps });
   }
-
   return switched;
 }
 
 /**
- * Read the name of the currently active watchlist from the dropdown button.
+ * Read the currently active watchlist name from the dropdown button.
  */
-export async function getActiveWatchlistName() {
+export async function getActiveWatchlistName({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   return evaluate(`
     (function() {
       var btn = document.querySelector('[data-name="watchlists-button"]');
@@ -89,7 +108,8 @@ export async function getActiveWatchlistName() {
   `);
 }
 
-export async function get() {
+export async function get({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   // Try internal API first — reads from the active watchlist widget
   const symbols = await evaluate(`
     (function() {
@@ -147,13 +167,35 @@ export async function get() {
   };
 }
 
-export async function add({ symbol }) {
-  // Use keyboard shortcut to open symbol search in watchlist, type symbol, press Enter
+export async function add({ symbol, _deps }) {
+  const { evaluate, getClient } = _resolve(_deps);
   const c = await getClient();
 
-  await ensureWatchlistPanelOpen();
+  // Ensure watchlist panel is open
+  const panelState = await evaluate(`
+    (function() {
+      var btn = document.querySelector('[data-name="base-watchlist-widget-button"]')
+        || document.querySelector('[aria-label*="Watchlist"]');
+      if (!btn) return { error: 'Watchlist button not found' };
+      var isActive = btn.getAttribute('aria-pressed') === 'true'
+        || btn.classList.toString().indexOf('Active') !== -1
+        || btn.classList.toString().indexOf('active') !== -1;
+      if (!isActive) {
+        var r = btn.getBoundingClientRect();
+        var x = r.x + r.width/2, y = r.y + r.height/2;
+        ['mousedown','mouseup','click'].forEach(function(t) {
+          btn.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, view:window, clientX:x, clientY:y }));
+        });
+        return { opened: true };
+      }
+      return { opened: false };
+    })()
+  `);
 
-  // Click the "Add symbol" button (various selectors)
+  if (panelState?.error) throw new Error(panelState.error);
+  if (panelState?.opened) await new Promise(r => setTimeout(r, 500));
+
+  // Click "Add symbol" button with real mouse events
   const addClicked = await evaluate(`
     (function() {
       var selectors = [
@@ -164,18 +206,13 @@ export async function add({ symbol }) {
       ];
       for (var s = 0; s < selectors.length; s++) {
         var btn = document.querySelector(selectors[s]);
-        if (btn && btn.offsetParent !== null) { btn.click(); return { found: true, selector: selectors[s] }; }
-      }
-      // Fallback: find + button in right panel
-      var container = document.querySelector('[class*="layout__area--right"]');
-      if (container) {
-        var buttons = container.querySelectorAll('button');
-        for (var i = 0; i < buttons.length; i++) {
-          var ariaLabel = buttons[i].getAttribute('aria-label') || '';
-          if (/add.*symbol/i.test(ariaLabel) || buttons[i].textContent.trim() === '+') {
-            buttons[i].click();
-            return { found: true, method: 'fallback' };
-          }
+        if (btn && btn.offsetParent !== null) {
+          var r = btn.getBoundingClientRect();
+          var x = r.x + r.width/2, y = r.y + r.height/2;
+          ['mousedown','mouseup','click'].forEach(function(t) {
+            btn.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, view:window, clientX:x, clientY:y }));
+          });
+          return { found: true, selector: selectors[s] };
         }
       }
       return { found: false };
@@ -183,39 +220,336 @@ export async function add({ symbol }) {
   `);
 
   if (!addClicked?.found) throw new Error('Add symbol button not found in watchlist panel');
-  await new Promise(r => setTimeout(r, 300));
-
-  // Type the symbol into the search input
-  await c.Input.insertText({ text: symbol });
   await new Promise(r => setTimeout(r, 500));
 
-  // Press Enter to select the first result
+  // Type the symbol
+  await c.Input.insertText({ text: symbol });
+  await new Promise(r => setTimeout(r, 800));
+
+  // Confirm the symbol-search dropdown surfaced at least one match
+  // before committing with Enter. Typos / delisted tickers would
+  // otherwise be silently reported as success because we always sent
+  // Enter regardless of dropdown state.
+  const dropdownHasMatch = await evaluate(`
+    (function() {
+      var items = document.querySelectorAll('[data-name="symbol-search-items"] [role="option"], [data-name="symbol-search-items"] [class*="item-"]');
+      if (items && items.length > 0) return { count: items.length };
+      var fallback = document.querySelectorAll('[class*="symbol-search-listbox"] [class*="item"]');
+      return { count: fallback ? fallback.length : 0 };
+    })()
+  `);
+  if (!dropdownHasMatch || !dropdownHasMatch.count) {
+    await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Escape', code: 'Escape' });
+    return { success: false, symbol, action: 'not_added', reason: 'no_match' };
+  }
+
+  // Press Enter to select first result
   await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
   await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter' });
-  await new Promise(r => setTimeout(r, 300));
+  await new Promise(r => setTimeout(r, 500));
 
-  // Press Escape to close search
-  await dispatchEscape(c);
+  // Press Escape to close search dialog
+  await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Escape', code: 'Escape' });
 
   return { success: true, symbol, action: 'added' };
 }
 
-export async function upload({ filePath }) {
+/**
+ * Remove symbols from the active watchlist via TradingView REST API.
+ * Strategy: read watchlist metadata from React fiber, extract HttpOnly
+ * session cookies via CDP Network.getCookies, then call the /remove/
+ * endpoint from Node.js (server-side) with proper authentication.
+ * Falls back to UI-based delete (click row + Delete key) if REST fails.
+ */
+export async function remove({ symbols, _deps }) {
+  const { evaluate, getClient } = _resolve(_deps);
+  const c = await getClient();
+
+  // Get the active watchlist metadata from the React fiber tree
+  const listInfo = await evaluate(`
+    (function() {
+      var panel = document.querySelector('[class*="layout__area--right"]');
+      if (!panel) return null;
+      var rows = panel.querySelectorAll('[data-symbol-full]');
+      if (!rows.length) return null;
+      var row = rows[0];
+      var reactKey = Object.keys(row).find(function(k) { return k.indexOf('__reactFiber') === 0; });
+      if (!reactKey) return null;
+      var fiber = row[reactKey];
+      var count = 0;
+      while (fiber && count < 45) {
+        if (fiber.memoizedProps && fiber.memoizedProps.current && fiber.memoizedProps.current.id) {
+          var cur = fiber.memoizedProps.current;
+          return { id: cur.id, name: cur.name, symbols: cur.symbols };
+        }
+        fiber = fiber.return;
+        count++;
+      }
+      return null;
+    })()
+  `);
+
+  if (!listInfo) throw new Error('Cannot read active watchlist — is the watchlist panel open?');
+
+  // Normalise input symbols to EXCHANGE:SYMBOL format.
+  // TradingView stores entries upper-case ("NASDAQ:AAPL"). Comparing
+  // case-sensitively silently dropped lower-case prefixed input — match
+  // case-insensitively so "nasdaq:aapl" resolves to the stored entry.
+  const toRemove = [];
+  const skipped = [];
+  const stored = listInfo.symbols || [];
+  const storedLower = stored.map(s => String(s).toLowerCase());
+  for (const sym of symbols) {
+    if (sym.includes(':')) {
+      const i = storedLower.indexOf(String(sym).toLowerCase());
+      if (i >= 0) toRemove.push(stored[i]);
+      else skipped.push(sym);
+    } else {
+      const match = stored.find(s => s.split(':')[1] === String(sym).toUpperCase());
+      if (match) toRemove.push(match);
+      else skipped.push(sym);
+    }
+  }
+
+  if (toRemove.length === 0) {
+    return { success: true, removed: [], skipped, message: 'No matching symbols in watchlist' };
+  }
+
+  // --- Strategy 1: Node.js-side REST API call with CDP-extracted cookies ---
+  try {
+    await c.Network.enable();
+    const { cookies } = await c.Network.getCookies({ urls: ['https://www.tradingview.com'] });
+    const cookieHeader = cookies.map(ck => `${ck.name}=${ck.value}`).join('; ');
+
+    const resp = await fetch(`https://www.tradingview.com/api/v1/symbols_list/custom/${listInfo.id}/remove/?source=web-tvd`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Language': 'en',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Origin': 'https://www.tradingview.com',
+        'Referer': 'https://www.tradingview.com/',
+        'Cookie': cookieHeader,
+      },
+      body: JSON.stringify(toRemove),
+    });
+
+    if (resp.ok) {
+      // Refresh the watchlist UI so it reflects the removal
+      await evaluate(`
+        (function() {
+          // Trigger a re-render by toggling the panel
+          var evt = new Event('resize');
+          window.dispatchEvent(evt);
+        })()
+      `);
+      return { success: true, removed: toRemove, skipped, api: 'rest', listId: listInfo.id, listName: listInfo.name };
+    }
+
+    // If REST failed, log and fall through to UI method
+    const errBody = await resp.text().catch(() => '');
+    console.error(`REST remove failed (${resp.status}): ${errBody}`);
+  } catch (err) {
+    console.error(`REST remove error: ${err.message}`);
+  }
+
+  // --- Strategy 2: UI-based delete (click row + Delete key) ---
+  return _removeViaUI({ symbols: toRemove, skipped, _deps });
+}
+
+/**
+ * Fallback: remove symbols by selecting each row and pressing Delete.
+ * Slower but reliable — uses CDP native Input events.
+ */
+async function _removeViaUI({ symbols, skipped = [], _deps }) {
+  const { evaluate, getClient } = _resolve(_deps);
+  const c = await getClient();
+  const results = [];
+
+  for (const sym of symbols) {
+    // Find the row in the DOM and get its coordinates
+    const rowInfo = await evaluate(`
+      (function() {
+        var panel = document.querySelector('[class*="layout__area--right"]');
+        if (!panel) return null;
+        var rows = panel.querySelectorAll('[data-symbol-full]');
+        for (var i = 0; i < rows.length; i++) {
+          if (rows[i].getAttribute('data-symbol-full') === ${JSON.stringify(sym)}) {
+            var el = rows[i].closest('[class*="row"]') || rows[i];
+            var r = el.getBoundingClientRect();
+            return { x: r.x + r.width/2, y: r.y + r.height/2, found: true };
+          }
+        }
+        return { found: false };
+      })()
+    `);
+
+    if (!rowInfo || !rowInfo.found) {
+      results.push({ symbol: sym, removed: false, reason: 'not_visible_in_scroll' });
+      continue;
+    }
+
+    // Click the row using CDP native mouse events (not JS dispatchEvent)
+    await c.Input.dispatchMouseEvent({ type: 'mousePressed', x: rowInfo.x, y: rowInfo.y, button: 'left', clickCount: 1 });
+    await c.Input.dispatchMouseEvent({ type: 'mouseReleased', x: rowInfo.x, y: rowInfo.y, button: 'left', clickCount: 1 });
+    await new Promise(r => setTimeout(r, 200));
+
+    // Press Delete key
+    await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
+    await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Delete', code: 'Delete' });
+    await new Promise(r => setTimeout(r, 300));
+
+    results.push({ symbol: sym, removed: true });
+  }
+
+  return {
+    success: true,
+    removed: results.filter(r => r.removed).map(r => r.symbol),
+    skipped,
+    results,
+    api: 'ui',
+  };
+}
+
+export async function addBulk({ symbols, _deps }) {
+  const { evaluate, getClient } = _resolve(_deps);
+  // Add multiple symbols in one "Add symbol" dialog session.
+  // TradingView keeps the dialog open between adds — just clear and retype.
+  const c = await getClient();
+
+  // Ensure watchlist panel is open
+  await evaluate(`
+    (function() {
+      var btn = document.querySelector('[data-name="base-watchlist-widget-button"]')
+        || document.querySelector('[aria-label*="Watchlist"]');
+      if (!btn) return;
+      var isActive = btn.getAttribute('aria-pressed') === 'true'
+        || btn.classList.toString().indexOf('Active') !== -1;
+      if (!isActive) {
+        var r = btn.getBoundingClientRect();
+        ['mousedown','mouseup','click'].forEach(function(t) {
+          btn.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, view:window, clientX:r.x+r.width/2, clientY:r.y+r.height/2 }));
+        });
+      }
+    })()
+  `);
+  await new Promise(r => setTimeout(r, 500));
+
+  // Open the Add symbol dialog once
+  const addClicked = await evaluate(`
+    (function() {
+      var btn = document.querySelector('[aria-label="Add symbol"]')
+        || document.querySelector('[data-name="add-symbol-button"]');
+      if (!btn || btn.offsetParent === null) return { found: false };
+      var r = btn.getBoundingClientRect();
+      ['mousedown','mouseup','click'].forEach(function(t) {
+        btn.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, view:window, clientX:r.x+r.width/2, clientY:r.y+r.height/2 }));
+      });
+      return { found: true };
+    })()
+  `);
+
+  if (!addClicked?.found) throw new Error('Add symbol button not found');
+  await new Promise(r => setTimeout(r, 500));
+
+  // Snapshot the panel's current symbols so we can diff after each
+  // Enter and report honest per-symbol success. The previous version
+  // pushed { added: true } unconditionally — misspelled or delisted
+  // tickers silently dropped.
+  async function snapshot() {
+    const snap = await evaluate(`
+      (function() {
+        var panel = document.querySelector('[class*="layout__area--right"]');
+        if (!panel) return [];
+        var out = [];
+        var rows = panel.querySelectorAll('[data-symbol-full]');
+        for (var i = 0; i < rows.length; i++) {
+          var s = rows[i].getAttribute('data-symbol-full');
+          if (s) out.push(String(s).toUpperCase());
+        }
+        return out;
+      })()
+    `);
+    return new Set(Array.isArray(snap) ? snap : []);
+  }
+
+  let before = await snapshot();
+  const results = [];
+  // CDP modifier bits: 4 = meta (macOS Cmd), 2 = ctrl (Linux/Win Ctrl).
+  const selectAllMod = process.platform === 'darwin' ? 4 : 2;
+  for (const sym of symbols) {
+    // Select all text in input and replace with new symbol
+    await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: selectAllMod });
+    await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'a', code: 'KeyA' });
+    await new Promise(r => setTimeout(r, 100));
+
+    await c.Input.insertText({ text: sym });
+    await new Promise(r => setTimeout(r, 800));
+
+    // Bail if the dropdown has no match — pressing Enter without one
+    // closes the dialog but adds nothing.
+    const dropdownHasMatch = await evaluate(`
+      (function() {
+        var items = document.querySelectorAll('[data-name="symbol-search-items"] [role="option"], [data-name="symbol-search-items"] [class*="item-"]');
+        if (items && items.length > 0) return items.length;
+        var fallback = document.querySelectorAll('[class*="symbol-search-listbox"] [class*="item"]');
+        return fallback ? fallback.length : 0;
+      })()
+    `);
+    if (!dropdownHasMatch) {
+      results.push({ symbol: sym, added: false, reason: 'no_match' });
+      continue;
+    }
+
+    // Enter to select first result
+    await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+    await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter' });
+    await new Promise(r => setTimeout(r, 500));
+
+    const after = await snapshot();
+    let landed = null;
+    for (const entry of after) {
+      if (!before.has(entry)) { landed = entry; break; }
+    }
+    if (landed) {
+      results.push({ symbol: sym, resolved_as: landed, added: true });
+      before = after;
+    } else {
+      results.push({ symbol: sym, added: false, reason: 'not_in_panel_after_enter' });
+    }
+  }
+
+  // Close dialog
+  await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Escape', code: 'Escape' });
+
+  const addedCount = results.filter(r => r.added).length;
+  return {
+    success: addedCount === symbols.length,
+    count: addedCount,
+    failed: symbols.length - addedCount,
+    symbols: results,
+  };
+}
+
+export async function upload({ filePath, _deps } = {}) {
   if (!filePath) throw new Error('filePath is required');
 
   const absolutePath = await realpath(filePath);
+  const { evaluate, getClient } = _resolve(_deps);
   const c = await getClient();
 
-  await ensureWatchlistPanelOpen();
-
+  await ensureWatchlistPanelOpen({ _deps });
   await c.Page.setInterceptFileChooserDialog({ enabled: true });
-  let fileChooser;
+
   const fileChooserPromise = new Promise(resolve => {
     c.Page.fileChooserOpened(params => resolve(params));
   });
 
   try {
-    await openWatchlistMenu();
+    await openWatchlistMenu({ _deps });
 
     const importRow = await evaluate(`
       (function() {
@@ -236,12 +570,9 @@ export async function upload({ filePath }) {
 
     if (importRow?.error) throw new Error(importRow.error);
 
-    // Dispatch a real (trusted) mouse click so the browser treats it as a user
-    // gesture — a synthetic element.click() does not have enough activation to
-    // open the file chooser, so Page.fileChooserOpened never fires.
     await dispatchClick(c, importRow.x, importRow.y);
 
-    fileChooser = await Promise.race([
+    const fileChooser = await Promise.race([
       fileChooserPromise,
       new Promise(resolve => setTimeout(() => resolve(null), 2000)),
     ]);
@@ -257,7 +588,7 @@ export async function upload({ filePath }) {
 
     await new Promise(r => setTimeout(r, 500));
   } finally {
-    try { await c.Page.setInterceptFileChooserDialog({ enabled: false }); } catch (_) {}
+    try { await c.Page.setInterceptFileChooserDialog({ enabled: false }); } catch {}
   }
 
   return {
@@ -269,13 +600,13 @@ export async function upload({ filePath }) {
   };
 }
 
-export async function delete_({ watchlistName }) {
+export async function delete_({ watchlistName, _deps } = {}) {
+  const { evaluate, getClient } = _resolve(_deps);
   const c = await getClient();
 
-  await ensureWatchlistPanelOpen();
-  await openWatchlistMenu();
+  await ensureWatchlistPanelOpen({ _deps });
+  await openWatchlistMenu({ _deps });
 
-  // Click "Open list..." to bring up the Watchlists manager dialog
   const openListClicked = await evaluate(`
     (function() {
       var menu = document.querySelector('.menuBox-XktvVkFF');
@@ -294,7 +625,6 @@ export async function delete_({ watchlistName }) {
   if (openListClicked?.error) throw new Error(openListClicked.error);
   await new Promise(r => setTimeout(r, 400));
 
-  // Find the matching list item in the manager dialog and click its remove button
   const removeClicked = await evaluate(`
     (function() {
       var targetTitle = ${safeString(watchlistName)};
@@ -313,14 +643,12 @@ export async function delete_({ watchlistName }) {
   `);
 
   if (removeClicked?.error) {
-    // Close the manager dialog before surfacing the error
     await dispatchEscape(c);
     throw new Error(removeClicked.error);
   }
 
   await new Promise(r => setTimeout(r, 300));
 
-  // Confirm deletion in the "Delete this watchlist?" dialog
   const confirmed = await evaluate(`
     (function() {
       var btns = document.querySelectorAll('button');
@@ -336,21 +664,19 @@ export async function delete_({ watchlistName }) {
 
   if (confirmed?.error) throw new Error(confirmed.error);
   await new Promise(r => setTimeout(r, 300));
-
-  // Close the Watchlists manager dialog
   await dispatchEscape(c);
 
   return { success: true, watchlistName, action: 'deleted' };
 }
 
-export async function getShareLink({ watchlistName } = {}) {
+export async function getShareLink({ watchlistName, _deps } = {}) {
+  const { evaluate, evaluateAsync, getClient } = _resolve(_deps);
   const c = await getClient();
 
-  await ensureWatchlistPanelOpen();
-  await openWatchlistMenu();
-  await switchToWatchlist(watchlistName);
+  await ensureWatchlistPanelOpen({ _deps });
+  await openWatchlistMenu({ _deps });
+  await switchToWatchlist(watchlistName, { _deps });
 
-  // "Copy link..." only appears once "Share list" is toggled on
   const shareState = await evaluate(`
     (function() {
       var menu = document.querySelector('.menuBox-XktvVkFF');
@@ -375,7 +701,6 @@ export async function getShareLink({ watchlistName } = {}) {
     sharingEnabled = true;
   }
 
-  // Find "Copy link..." now that sharing is on
   const copyRow = await evaluate(`
     (function() {
       var menu = document.querySelector('.menuBox-XktvVkFF');
@@ -393,22 +718,17 @@ export async function getShareLink({ watchlistName } = {}) {
 
   if (copyRow?.error) throw new Error(copyRow.error);
 
-  // Dispatch a real (trusted) mouse click — clipboard writes require user
-  // activation, so a synthetic element.click() silently does nothing.
   await dispatchClick(c, copyRow.x, copyRow.y);
   await new Promise(r => setTimeout(r, 500));
 
   await c.Browser.grantPermissions({ permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
   const shareLink = await evaluateAsync('navigator.clipboard.readText()');
-
-  // Close the dropdown menu
   await dispatchEscape(c);
 
   if (!shareLink || !/^https?:\/\//.test(shareLink)) {
     throw new Error('Failed to read share link from clipboard');
   }
 
-  const activeName = await getActiveWatchlistName();
-
+  const activeName = await getActiveWatchlistName({ _deps });
   return { success: true, watchlistName: activeName, shareLink, sharingEnabled };
 }

@@ -50,8 +50,73 @@ function printCommandHelp(name, cmd) {
   }
 }
 
+/**
+ * Shield leading-hyphen-digit positionals (e.g. indicator names like
+ * "-4 CB Model Indicator") from parseArgs, which would parse `-4` as a
+ * short flag. Inserts `--` before the first such arg unless the caller
+ * already supplied one. Safe because no command defines a `-N` flag —
+ * all our short options are `-<letter>`.
+ */
+export function shieldNegativePositionals(args) {
+  if (args.includes('--')) return args;
+  // Skip when the leading-hyphen-digit arg is the VALUE of a preceding
+  // short flag (e.g. `tv replay start -d -7d` — here `-7d` is the date,
+  // not a positional). Without this carve-out, inserting `--` between
+  // `-d` and `-7d` decays `-d` into a boolean flag and loses the value.
+  // We can't tell from here whether the short flag expects a value, so
+  // be conservative: any bare `-<letter>` immediately before defers.
+  const idx = args.findIndex((a, i) => {
+    if (!/^-\d/.test(a)) return false;
+    const prev = args[i - 1];
+    if (prev && /^-[a-zA-Z]$/.test(prev)) return false;
+    return true;
+  });
+  if (idx === -1) return args;
+  return [...args.slice(0, idx), '--', ...args.slice(idx)];
+}
+
+/**
+ * Execute a single command and return its result (no process.exit, no
+ * stdout JSON write). Used by `tv repl` so one CDP client can be reused
+ * across many commands without per-invocation reconnect overhead — the
+ * IDEAS line 211-219 batch-sweep speedup.
+ *
+ * Throws on parse errors / handler errors; caller is responsible for
+ * formatting + writing.
+ */
+export async function runOnce(rawArgs) {
+  const args = shieldNegativePositionals(rawArgs);
+  if (args.length === 0) throw new Error('Empty command');
+
+  const cmdName = args[0];
+  const cmd = commands.get(cmdName);
+  if (!cmd) throw new Error(`Unknown command: ${cmdName}`);
+
+  if (cmd.subcommands) {
+    const subName = args[1];
+    if (!subName) throw new Error(`Subcommand required for ${cmdName}`);
+    const sub = cmd.subcommands.get(subName);
+    if (!sub) throw new Error(`Unknown subcommand: ${cmdName} ${subName}`);
+    const { values, positionals } = parseArgs({
+      args: args.slice(2),
+      options: { help: { type: 'boolean', short: 'h' }, ...(sub.options || {}) },
+      allowPositionals: true,
+      strict: false,
+    });
+    return await sub.handler(values, positionals);
+  }
+
+  const { values, positionals } = parseArgs({
+    args: args.slice(1),
+    options: { help: { type: 'boolean', short: 'h' }, ...(cmd.options || {}) },
+    allowPositionals: true,
+    strict: false,
+  });
+  return await cmd.handler(values, positionals);
+}
+
 export async function run(argv) {
-  const args = argv.slice(2);
+  const args = shieldNegativePositionals(argv.slice(2));
 
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
     printHelp();
@@ -132,7 +197,10 @@ async function execute(handler, values, positionals) {
   try {
     const result = await handler(values, positionals);
     console.log(JSON.stringify(result, null, 2));
-    process.exit(0);
+    // Let the event loop drain instead of process.exit() — avoids a Windows
+    // libuv double-close assertion when undici's fetch keepalive socket is
+    // still open at exit time.
+    process.exitCode = 0;
   } catch (err) {
     handleError(err);
   }

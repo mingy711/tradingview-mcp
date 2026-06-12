@@ -25,6 +25,11 @@ import './commands/ui.js';
 import './commands/pane.js';
 import './commands/tab.js';
 import './commands/stream.js';
+import './commands/hotlist.js';
+import './commands/repl.js';
+import './commands/strategy.js';
+import './commands/news.js';
+import './commands/screener.js';
 
 // Run
 import { run } from './router.js';

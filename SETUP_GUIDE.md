@@ -5,7 +5,7 @@ This file is a step-by-step guide for Claude Code (or any LLM agent) to install 
 ## Step 1: Clone and Install
 
 ```bash
-git clone https://github.com/tradesdontlie/tradingview-mcp.git ~/tradingview-mcp
+git clone https://github.com/iliaal/tradingview-mcp.git ~/tradingview-mcp
 cd ~/tradingview-mcp
 npm install
 ```
@@ -14,7 +14,16 @@ If the user specifies a different install path, use that instead of `~/tradingvi
 
 ## Step 2: Add to MCP Config
 
-Add the server to the user's Claude Code MCP configuration. The config file is at `~/.claude/.mcp.json` (global) or `.mcp.json` (project-level).
+Prefer the Claude Code CLI — it writes to the correct config location and avoids merge mistakes:
+
+```bash
+claude mcp add tradingview --scope user -- node <INSTALL_PATH>/src/server.js
+```
+
+If the CLI isn't available, edit the config by hand. Claude Code reads MCP servers from one of two locations (note: `~/.claude/.mcp.json` is **not** one of them — earlier versions of this guide pointed there and the server silently failed to load):
+
+- **User scope:** `~/.claude.json`, under the top-level `mcpServers` key.
+- **Project scope:** `<project-root>/.mcp.json`.
 
 ```json
 {
@@ -96,7 +105,7 @@ Then `tv status`, `tv quote`, `tv pine compile`, etc. work from anywhere.
 |---------|----------|
 | `cdp_connected: false` | Launch TradingView with `--remote-debugging-port=9222` |
 | `ECONNREFUSED` | TradingView isn't running or port 9222 is blocked |
-| MCP server not showing in Claude Code | Check `~/.claude/.mcp.json` syntax, restart Claude Code |
+| MCP server not showing in Claude Code | Confirm the entry is in `~/.claude.json` (user scope) or `<project>/.mcp.json` (project scope) — `~/.claude/.mcp.json` is not read. Then restart Claude Code. |
 | `tv` command not found | Run `npm link` from the project directory |
 | Tools return stale data | TradingView may still be loading — wait a few seconds |
 | Pine Editor tools fail | Open the Pine Editor panel first (`ui_open_panel pine-editor open`) |

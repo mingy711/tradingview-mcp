@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { boolish } from './_validation.js';
 import { jsonResult } from './_format.js';
 import * as core from '../core/chart.js';
 
@@ -10,9 +11,10 @@ export function registerChartTools(server) {
 
   server.tool('chart_set_symbol', 'Change the chart symbol', {
     symbol: z.string().describe('Symbol to set (e.g., BTCUSD, AAPL, ES1!, NYMEX:CL1!)'),
-  }, async ({ symbol }) => {
-    try { return jsonResult(await core.setSymbol({ symbol })); }
-    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+    discard_unsaved: boolish.optional().describe('Proceed past an unsaved-changes dialog and lose unsaved Pine/drawing edits (default false — the switch is refused with an UNSAVED_CHANGES error so work is never silently discarded).'),
+  }, async ({ symbol, discard_unsaved }) => {
+    try { return jsonResult(await core.setSymbol({ symbol, discard_unsaved })); }
+    catch (err) { return jsonResult({ success: false, error: err.message, ...(err.code ? { code: err.code } : {}), ...(err.unsaved_changes ? { unsaved_changes: true } : {}) }, true); }
   });
 
   server.tool('chart_set_timeframe', 'Change the chart timeframe/resolution', {
@@ -29,13 +31,20 @@ export function registerChartTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('chart_manage_indicator', 'Add or remove an indicator/study on the chart', {
+  server.tool('chart_manage_indicator', 'Add or remove an indicator/study on the chart. For built-in studies pass the full name (e.g. "Relative Strength Index"). For user-saved Pine scripts, pass the scriptIdPart in "USER;<hash>" form (from pine_list_scripts) — the tool will open the script in the Pine editor and click Add to chart since chart.createStudy() does not accept user scripts directly.', {
     action: z.enum(['add', 'remove']).describe('Action: add or remove'),
-    indicator: z.string().describe('Full indicator name: "Relative Strength Index", "MACD", "Volume", "Moving Average", "Bollinger Bands", "Moving Average Exponential". Short names like RSI/EMA do NOT work.'),
+    indicator: z.string().describe('Full built-in indicator name ("Relative Strength Index", "MACD", "Volume", "Moving Average", "Bollinger Bands", "Moving Average Exponential" — short names like RSI/EMA do NOT work) OR user Pine script id in "USER;<hash>" form (from pine_list_scripts).'),
     entity_id: z.string().optional().describe('Entity ID to remove (from chart_get_state). Required for remove.'),
-    inputs: z.string().optional().describe('JSON string of input overrides for the indicator (e.g., \'{"length": 20}\')'),
+    inputs: z.string().optional().describe('JSON string of input overrides for the indicator (e.g., \'{"length": 20}\'). Only honored for built-in studies, not USER; scripts.'),
   }, async ({ action, indicator, entity_id, inputs }) => {
     try { return jsonResult(await core.manageIndicator({ action, indicator, entity_id, inputs })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('chart_remove_studies_by_title', 'Remove all studies/indicators whose name contains the given substring (case-insensitive). Returns matched + removed lists. Useful for cleaning up duplicates or removing by Pine script name without first calling chart_get_state.', {
+    title_match: z.string().describe('Case-insensitive substring of study name (e.g., "SMC Engine", "Volume Profile")'),
+  }, async ({ title_match }) => {
+    try { return jsonResult(await core.removeStudiesByTitle({ title_match })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
@@ -44,11 +53,12 @@ export function registerChartTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('chart_set_visible_range', 'Zoom the chart to a specific date range (unix timestamps)', {
+  server.tool('chart_set_visible_range', 'Zoom the chart to a specific date range (unix seconds). When `from` predates the loaded bar buffer, TV silently clamps the zoom; `auto_extend_cache=true` (default) detects the clamp and briefly enters replay mode at `from` to preload historical bars, then retries. Response carries `cache_extended` + final `clamped` flag.', {
     from: z.coerce.number().describe('Start of range (unix timestamp in seconds)'),
     to: z.coerce.number().describe('End of range (unix timestamp in seconds)'),
-  }, async ({ from, to }) => {
-    try { return jsonResult(await core.setVisibleRange({ from, to })); }
+    auto_extend_cache: boolish.optional().describe('Default true. When the requested range pre-dates the loaded bar buffer, auto-preload via brief replay-mode entry.'),
+  }, async ({ from, to, auto_extend_cache }) => {
+    try { return jsonResult(await core.setVisibleRange({ from, to, auto_extend_cache })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

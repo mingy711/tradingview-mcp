@@ -58,13 +58,6 @@ register('ui', {
         return core.findElement({ query: positionals.join(' '), strategy: opts.strategy });
       },
     }],
-    ['eval', {
-      description: 'Execute JavaScript in TradingView page context',
-      handler: (opts, positionals) => {
-        if (!positionals[0]) throw new Error('Expression required. Usage: tv ui eval "1+1"');
-        return core.uiEvaluate({ expression: positionals.join(' ') });
-      },
-    }],
     ['type', {
       description: 'Type text into focused input',
       handler: (opts, positionals) => {
@@ -84,13 +77,21 @@ register('ui', {
       handler: () => core.fullscreen(),
     }],
     ['mouse', {
-      description: 'Click at x,y coordinates',
+      description: 'Click at x,y coordinates OR a CSS selector. Selector is preferred (auto devicePixelRatio scaling)',
       options: {
         right: { type: 'boolean', description: 'Right click' },
         double: { type: 'boolean', description: 'Double click' },
+        selector: { type: 'string', short: 's', description: 'CSS selector to click (avoids HiDPI / WSL2 coord-space issues)' },
       },
       handler: (opts, positionals) => {
-        if (positionals.length < 2) throw new Error('Usage: tv ui mouse 400 400 [--right] [--double]');
+        if (opts.selector) {
+          return core.mouseClick({
+            selector: opts.selector,
+            button: opts.right ? 'right' : 'left',
+            double_click: opts.double,
+          });
+        }
+        if (positionals.length < 2) throw new Error('Usage: tv ui mouse 400 400 [--right] [--double] OR tv ui mouse --selector "button[aria-label=\\"Bar replay\\"]"');
         return core.mouseClick({
           x: Number(positionals[0]),
           y: Number(positionals[1]),

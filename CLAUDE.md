@@ -1,6 +1,6 @@
 # TradingView MCP — Claude Instructions
 
-81 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222).
+96 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222).
 
 ## Decision Tree — Which Tool When
 
@@ -23,6 +23,10 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 - `data_get_ohlcv` with `summary: true` → compact stats (high, low, range, change%, avg volume, last 5 bars)
 - `data_get_ohlcv` without summary → all bars (use `count` to limit, default 100)
 - `quote_get` → single latest price snapshot
+- `data_detect_candlestick_patterns` → native scan over recent OHLC for 17 classic patterns (doji, hammer, engulfing, morning/evening star, etc.) — no chart pollution
+
+### "Top-down / multi-timeframe view"
+- `data_get_multi_timeframe` with `timeframes: ["W","D","240","60","15"]` → per-TF indicator values + price summary in one call. Saves and restores the original timeframe. Same indicators must already be loaded on the chart.
 
 ### "Analyze my chart" (full report workflow)
 1. `quote_get` → current price
@@ -62,6 +66,9 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 ### "Screen multiple symbols"
 - `batch_run` with `symbols: ["ES1!", "NQ1!", "YM1!"]` and `action: "screenshot"` or `"get_ohlcv"`
 
+### "Find today's market movers"
+- `hotlist_get` with `slug: "volume_gainers"` (or `percent_change_gainers`, `percent_change_losers`, `gap_gainers`, `gap_losers`, `percent_range_gainers`, `percent_range_losers`, `percent_gap_gainers`, `percent_gap_losers`) → calls TradingView's public scanner preset endpoint, returns up to 20 US symbols ranked by the hotlist field. Pairs naturally with `watchlist_add_bulk`.
+
 ### "Draw on the chart"
 - `draw_shape` → horizontal_line, trend_line, rectangle, text (pass point + optional point2)
 - `draw_list` → see what's drawn
@@ -69,17 +76,11 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 - `draw_clear` → remove all
 
 ### "Manage alerts"
-- `alert_create` → set price alert (condition: "crossing", "greater_than", "less_than")
-- `alert_create_for_watchlist` → set an alert on every symbol in a watchlist, optionally driven by a custom Pine indicator's `alertcondition()` instead of "Price"
-- `alert_list` → view active alerts
-- `alert_delete` → remove alerts
-
-### "Manage watchlists"
-- `watchlist_get` → read symbols from the current watchlist
-- `watchlist_add` → add one symbol to the current watchlist
-- `watchlist_upload` → import/upload a TradingView watchlist text file
-- `watchlist_delete` → delete an entire watchlist by name
-- `watchlist_get_share_link` → get a shareable link for a watchlist (enables sharing if needed)
+All four tools post to `pricealerts.tradingview.com` REST. No DOM scraping, no UI brittleness, returns real `alert_id`.
+- `alert_create` → price alert on the active chart symbol. `condition` accepts "crossing"/"greater_than"/"less_than" (and aliases like "above"/"cross_up"); normalized to TV's `cross`/`cross_up`/`cross_down`. Returns `alert_id`.
+- `alert_create_indicator` → fires on a Pine `alertcondition()` signal (BUY/SELL → webhook). Needs `pine_id`, `alert_cond_id` (e.g. `plot_12`), `inputs`, `offsets_by_plot`. Discover the schema by creating one alert manually in the UI, then reading it back via `alert_list`.
+- `alert_list` → view active alerts (with `alert_id`s).
+- `alert_delete` → pass `alert_id` for one, `alert_ids: [...]` for bulk in a single request, or `delete_all: true`.
 
 ### "Navigate the UI"
 - `ui_open_panel` → open/close pine-editor, strategy-tester, watchlist, alerts, trading
@@ -116,6 +117,9 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 | `data_get_pine_boxes` | ~1-2 KB per study (deduplicated zones) |
 | `data_get_ohlcv` (summary) | ~500 bytes |
 | `data_get_ohlcv` (100 bars) | ~8 KB |
+| `data_detect_candlestick_patterns` (100 bars) | ~1-3 KB (only matched bars) |
+| `data_get_multi_timeframe` (5 TFs × 5 indicators) | ~1-2 KB |
+| `hotlist_get` (20 symbols) | ~1-2 KB |
 | `capture_screenshot` | ~300 bytes (returns file path, not image data) |
 
 ## Tool Conventions
