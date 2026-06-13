@@ -53,7 +53,19 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 5. `pine_get_source` → read current code back (WARNING: can be very large for complex scripts)
 6. `pine_save` → save to TradingView cloud
 7. `pine_new` → create blank indicator/strategy/library
-8. `pine_open` → load a saved script by name
+8. `pine_open` → load a saved script by name (reads source via the internal API only — does NOT
+   switch the visible editor tab/binding)
+
+### "Edit/replace an EXISTING saved script"
+`pine_open` does NOT rebind the visible Pine Editor to the target script — it only fetches the
+script's source through the internal API. If you then call `pine_set_source` / `pine_save` /
+`pine_smart_compile`, they act on whatever script is currently visible in the editor, NOT the
+one passed to `pine_open` — which clobbers the wrong script or appears to silently no-op.
+
+1. `pine_switch_script` → properly switch the editor to the target script (title button +
+   script binding) via the Ctrl+O picker
+2. `pine_set_source` → inject the modified code
+3. `pine_smart_compile` / `pine_save` → compile and/or persist
 
 ### "Practice trading with replay"
 1. `replay_start` with `date: "2025-03-01"` → enter replay mode

@@ -542,6 +542,12 @@ export async function upload({ filePath, _deps } = {}) {
   const c = await getClient();
 
   await ensureWatchlistPanelOpen({ _deps });
+
+  // Page/DOM domains are not enabled globally (see connection.js) — enable
+  // them here so fileChooserOpened fires and the native OS file picker
+  // doesn't open (which would block the Electron main process).
+  await c.Page.enable();
+  await c.DOM.enable();
   await c.Page.setInterceptFileChooserDialog({ enabled: true });
 
   const fileChooserPromise = new Promise(resolve => {
@@ -589,6 +595,8 @@ export async function upload({ filePath, _deps } = {}) {
     await new Promise(r => setTimeout(r, 500));
   } finally {
     try { await c.Page.setInterceptFileChooserDialog({ enabled: false }); } catch {}
+    try { await c.DOM.disable(); } catch {}
+    try { await c.Page.disable(); } catch {}
   }
 
   return {

@@ -29,10 +29,14 @@ function _resolve(deps) {
 const FIND_MONACO = `
   (function findMonacoEditor() {
     // Pick the Pine editor (by .pine-editor-monaco ancestor) out of any
-    // editors returned by monaco.editor.getEditors(). Falls back to the
-    // first editor when no Pine-specific one is found — covers brief
-    // windows during tab switches where the editor container hasn't
-    // remounted yet.
+    // editors returned by monaco.editor.getEditors(). getEditors() can
+    // also return detached/offscreen instances — e.g. pineEditorTestApi
+    // creates a hidden editor for pine_open's internal-API read path that
+    // is never attached to the DOM. If none match .pine-editor-monaco,
+    // prefer a visible, in-DOM editor (the one the user actually sees and
+    // that pine_save/pine_compile operate on) before falling back to the
+    // first editor — covers brief windows during tab switches where the
+    // editor container hasn't remounted yet.
     function pickPineEditor(monaco) {
       try {
         var editors = monaco.editor.getEditors();
@@ -41,6 +45,13 @@ const FIND_MONACO = `
           var node = typeof ed.getContainerDomNode === 'function' ? ed.getContainerDomNode() : null;
           if (node && node.closest && node.closest('.pine-editor-monaco')) {
             return { editor: ed, env: { editor: monaco.editor } };
+          }
+        }
+        for (var j = 0; j < editors.length; j++) {
+          var ed2 = editors[j];
+          var node2 = typeof ed2.getContainerDomNode === 'function' ? ed2.getContainerDomNode() : null;
+          if (node2 && document.body.contains(node2) && node2.offsetParent !== null) {
+            return { editor: ed2, env: { editor: monaco.editor } };
           }
         }
         if (editors.length > 0) return { editor: editors[0], env: { editor: monaco.editor } };
