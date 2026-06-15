@@ -79,11 +79,19 @@ const FIND_MONACO = `
     // it on window. We push a fake chunk whose runtime callback scans
     // all modules for one exporting editor.getEditors, then cache it on
     // window.__tvMonaco for subsequent calls. One-time ~100 ms cost.
+    //
+    // Chunk id MUST be unique per push: webpack's webpackJsonpCallback marks
+    // installedChunks[chunkId] = 0 once a chunk id has been seen, and skips
+    // invoking the runtime callback entirely on any later push whose chunk
+    // ids are all already 0. If the Pine Monaco module (lazy-loaded) hadn't
+    // registered yet on the first call — e.g. right after pine_open — a
+    // fixed id permanently disables this extraction path for the rest of
+    // the page session, even after Monaco becomes available.
     try {
       var chunkArray = window.webpackChunktradingview;
       if (chunkArray && typeof chunkArray.push === 'function') {
         chunkArray.push([
-          ['__tv_monaco_extract__'],
+          ['__tv_monaco_extract__' + Date.now() + '_' + Math.random()],
           {},
           function(require) {
             try {
@@ -178,8 +186,10 @@ const MONACO_PINE_EDITOR_AVAILABLE = `
       try {
         var chunkArray = window.webpackChunktradingview;
         if (chunkArray && typeof chunkArray.push === 'function') {
+          // Unique chunk id per push — see Path 3 comment in FIND_MONACO
+          // for why a fixed id permanently disables this extraction.
           chunkArray.push([
-            ['__tv_monaco_extract__'],
+            ['__tv_monaco_extract__' + Date.now() + '_' + Math.random()],
             {},
             function(require) {
               try {
