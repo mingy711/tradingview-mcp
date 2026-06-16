@@ -6,6 +6,16 @@ register('status', {
   handler: () => core.healthCheck(),
 });
 
+register('network', {
+  description: 'Check connectivity to TradingView data endpoints',
+  options: {
+    timeout: { type: 'string', short: 't', description: 'Per-request timeout in milliseconds (default 5000)' },
+  },
+  handler: (opts) => core.networkCheck({
+    timeout_ms: opts.timeout ? Number(opts.timeout) : undefined,
+  }),
+});
+
 register('launch', {
   description: 'Launch TradingView with CDP enabled',
   options: {

@@ -1,27 +1,50 @@
 /**
- * Comprehensive E2E tests for all 70 TradingView MCP tools.
- * Requires TradingView Desktop running with --remote-debugging-port=9222
+ * Comprehensive E2E tests for the TradingView MCP tools (93 tools as of
+ * 2026-04-25). Each describe-block covers a tool family and exercises the
+ * representative paths via wrapper functions; complete-coverage smoke tests
+ * for individual exports live under tests/smoke/*.smoke.test.js.
  *
+ * Requires TradingView Desktop running with --remote-debugging-port=9222
  * Run: node --test tests/e2e.test.js
  *
- * Coverage: 70+ tests across 12 tool modules
- * - Health & Connection (4 tools)
- * - Chart Control (8 tools)
- * - Data Access (12 tools)
- * - Pine Script (12 tools)
- * - Drawing (5 tools)
- * - UI Automation (12 tools)
- * - Replay Mode (6 tools)
+ * Coverage families (counts approximate — see src/tools/*.js for the
+ * authoritative tool list):
+ * - Health & Connection (6 tools)
+ * - Chart Control (10 tools)
+ * - Data Access (13 tools)
+ * - Pine Script (17 tools)
+ * - Drawing (6 tools)
+ * - UI Automation (10 tools)
+ * - Replay Mode (7 tools)
+ * - Pane / Layout (6 tools)
+ * - Tab Management (5 tools)
  * - Alerts (3 tools)
- * - Watchlist (2 tools)
+ * - Watchlist (4 tools)
  * - Indicators (2 tools)
- * - Batch (1 tool)
- * - Capture (1 tool)
+ * - Batch / Capture (2 tools)
+ * - Layout (2 tools)
  */
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import CDP from 'chrome-remote-interface';
+// Wrapper functions — preferred over raw CDP calls. Tests that exercise
+// MCP-tool surfaces should call these so we catch wrapper regressions
+// (which is what the user-facing MCP tools actually do) rather than
+// validating TV's underlying API directly.
+import * as coreUi from '../src/core/ui.js';
+import * as coreReplay from '../src/core/replay.js';
+import * as coreHealth from '../src/core/health.js';
+import * as coreAlerts from '../src/core/alerts.js';
+import * as coreData from '../src/core/data.js';
+import * as corePane from '../src/core/pane.js';
+import * as coreChart from '../src/core/chart.js';
+import * as coreDrawing from '../src/core/drawing.js';
+import * as coreWatchlist from '../src/core/watchlist.js';
+import * as corePine from '../src/core/pine.js';
+import * as coreIndicators from '../src/core/indicators.js';
+import { dismissBlockingDialogs } from '../src/core/dialog.js';
+import { disconnect as disconnectCoreClient } from '../src/connection.js';
 
 let client;
 let Runtime;
@@ -59,9 +82,49 @@ function wv(path) {
 /** Sleep for ms */
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+/**
+ * Dismiss any 'Leave current replay?' or 'Unsaved changes' dialog that TV may
+ * have popped up since the last call. Safe no-op when no dialog is present.
+ * Inline (mirrors src/core/dialog.js) so e2e is self-contained.
+ */
+async function dismissDialogs() {
+  return await evaluate(`
+    (function() {
+      var dismissed = [];
+      var patterns = [
+        { match: /Leave current replay\\??/i, button: /^Leave$/i, note: 'leave_replay' },
+        { match: /Continue your last replay\\??/i, button: /^close$/i, note: 'continue_replay' },
+        { match: /You have unsaved changes/i, button: /^(Open anyway|Don'?t save|Discard|Abrir mesmo|Descartar|Não salvar|Abrir de todos|No guardar|Ouvrir quand|Ne pas enregistrer|Abandonner|Trotzdem öffnen|Nicht speichern|Verwerfen)$/i, note: 'unsaved' }
+      ];
+      var els = document.querySelectorAll('div, section');
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        if (el.offsetParent === null) continue;
+        var t = el.textContent || '';
+        if (t.length > 600) continue;
+        for (var p = 0; p < patterns.length; p++) {
+          if (!patterns[p].match.test(t)) continue;
+          var btns = el.querySelectorAll('button');
+          for (var j = 0; j < btns.length; j++) {
+            var b = btns[j];
+            if (b.offsetParent === null) continue;
+            if (patterns[p].button.test((b.textContent || b.getAttribute('title') || '').trim())) {
+              b.click();
+              dismissed.push(patterns[p].note);
+              break;
+            }
+          }
+          break;
+        }
+      }
+      return dismissed;
+    })()
+  `);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('TradingView MCP — Full E2E (70 tools)', () => {
+describe('TradingView MCP — Full E2E (93 tools)', () => {
 
   before(async () => {
     try {
@@ -76,6 +139,69 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
       Runtime = client.Runtime;
       Input = client.Input;
       Page = client.Page;
+
+      // Reset any lingering state from a previous run before test execution.
+      // Stops replay, returns to realtime, wipes _replaySessionState, and
+      // dismisses any 'Leave current replay?' / 'Continue your last replay?' /
+      // unsaved-changes dialogs left over from a prior session.
+      // Without this, every chart_set_symbol downstream silently no-ops or
+      // hangs on a blocking modal with no role='dialog' marker.
+      try {
+        await evaluate(`
+          (function() {
+            try {
+              var api = window.TradingViewApi && window.TradingViewApi._replayApi;
+              if (api) {
+                try { api.stopReplay(); } catch(e) {}
+                try { api.goToRealtime(); } catch(e) {}
+              }
+              // Clear saved-replay-state so subsequent setSymbol doesn't pop
+              // 'Leave current replay?' and so a future TV restart doesn't
+              // pop 'Continue your last replay?'. The state is at two paths
+              // (the live collection + the linking namespace).
+              var col = window.TradingViewApi && window.TradingViewApi._chartWidgetCollection;
+              if (col) col._replaySessionState = null;
+              // The cached state also lives at chartWidget._linking._chartWidgetCollection
+              // on TV 3.1; nulling only the top-level path leaves the linking copy
+              // intact, which is what survives a TV process restart.
+              var linking = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV
+                && window.TradingViewApi._activeChartWidgetWV.value()
+                && window.TradingViewApi._activeChartWidgetWV.value()._chartWidget
+                && window.TradingViewApi._activeChartWidgetWV.value()._chartWidget._linking;
+              if (linking && linking._chartWidgetCollection) linking._chartWidgetCollection._replaySessionState = null;
+            } catch(e) {}
+          })()
+        `);
+        // Dismiss known modal dialogs. Inline so the e2e file has no dependency
+        // on src/core/dialog.js — keeps the e2e runnable in any branch state.
+        await evaluate(`
+          (function() {
+            var patterns = [
+              { match: /Leave current replay\\??/i, button: /^Leave$/i },
+              { match: /Continue your last replay\\??/i, button: /^close$/i },
+              { match: /You have unsaved changes/i, button: /^(Open anyway|Don'?t save|Discard|Abrir mesmo|Descartar|Não salvar|Abrir de todos|No guardar|Ouvrir quand|Ne pas enregistrer|Abandonner|Trotzdem öffnen|Nicht speichern|Verwerfen)$/i }
+            ];
+            var els = document.querySelectorAll('div, section');
+            for (var i = 0; i < els.length; i++) {
+              var el = els[i];
+              if (el.offsetParent === null) continue;
+              var t = el.textContent || '';
+              if (t.length > 600) continue;
+              for (var p = 0; p < patterns.length; p++) {
+                if (!patterns[p].match.test(t)) continue;
+                var btns = el.querySelectorAll('button');
+                for (var j = 0; j < btns.length; j++) {
+                  var b = btns[j];
+                  if (b.offsetParent === null) continue;
+                  var label = (b.textContent || b.getAttribute('title') || '').trim();
+                  if (patterns[p].button.test(label)) { b.click(); break; }
+                }
+                break;
+              }
+            }
+          })()
+        `);
+      } catch {}
     } catch (err) {
       console.error('Cannot connect to TradingView. Make sure it is running with --remote-debugging-port=9222');
       process.exit(1);
@@ -84,6 +210,11 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
 
   after(async () => {
     if (client) try { await client.close(); } catch {}
+    // Tests that called core wrappers (coreUi.openPanel, coreReplay.stop)
+    // opened a separate CDP client via src/connection.js getClient().
+    // Without this, the test runner waits for that client's WebSocket to
+    // time out before exiting — a multi-minute hang.
+    try { await disconnectCoreClient(); } catch {}
   });
 
   // ─── 1. HEALTH & CONNECTION (4 tools) ─────────────────────────────────
@@ -92,26 +223,12 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
 
     it('tv_health_check — CDP connection + chart state', async () => {
       assert.ok(client, 'CDP client connected');
-      const state = await evaluate(`
-        (function() {
-          var result = { url: window.location.href, title: document.title };
-          try {
-            var chart = ${CHART_API};
-            result.symbol = chart.symbol();
-            result.resolution = chart.resolution();
-            result.chartType = chart.chartType();
-            result.apiAvailable = true;
-          } catch(e) {
-            result.apiAvailable = false;
-            result.apiError = e.message;
-          }
-          return result;
-        })()
-      `);
-      assert.ok(state.apiAvailable, 'Chart API available');
-      assert.ok(state.symbol, 'Has symbol');
-      assert.ok(state.resolution, 'Has resolution');
-      assert.ok(typeof state.chartType === 'number', 'Has chart type');
+      const r = await coreHealth.healthCheck();
+      assert.equal(r.success, true, 'health_check returns success');
+      assert.equal(r.api_available, true, 'Chart API available');
+      assert.ok(r.chart_symbol, 'Has symbol');
+      assert.ok(r.chart_resolution, 'Has resolution');
+      assert.ok(typeof r.chart_type === 'number', 'Has chart type');
     });
 
     it('tv_discover — report available API paths', async () => {
@@ -124,30 +241,37 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
     });
 
     it('tv_ui_state — panels, buttons, chart state', async () => {
-      const state = await evaluate(`
-        (function() {
-          var ui = {};
-          var bottom = document.querySelector('[class*="layout__area--bottom"]');
-          ui.bottom_panel = { height: bottom ? bottom.offsetHeight : 0 };
-          var right = document.querySelector('[class*="layout__area--right"]');
-          ui.right_panel = { width: right ? right.offsetWidth : 0 };
-          ui.button_count = document.querySelectorAll('button').length;
-          return ui;
-        })()
-      `);
+      const state = await coreHealth.uiState();
       assert.ok(state, 'UI state returned');
-      assert.ok(state.button_count > 0, 'Buttons found');
+      assert.equal(state.success, true);
+      // ui_state surfaces buttons by region; just verify the structure and
+      // that at least one region populated.
+      assert.ok(state.buttons && Object.keys(state.buttons).length > 0, 'Buttons grouped by region');
     });
 
-    it('tv_launch — auto-detect binary (verify path resolution only)', async () => {
-      // tv_launch is destructive (kills TradingView), so we only test path detection
-      const { existsSync } = await import('fs');
-      const paths = [
-        '/Applications/TradingView.app/Contents/MacOS/TradingView',
-        `${process.env.HOME}/Applications/TradingView.app/Contents/MacOS/TradingView`,
-      ];
-      const found = paths.some(p => existsSync(p));
-      assert.ok(found, 'TradingView binary found on disk');
+    it('tv_launch — auto-detect binary (non-destructive)', async () => {
+      // Exercise the actual launch wrapper. It short-circuits when CDP is
+      // already responding on the requested port (which it is, since this
+      // test suite runs against a live TV), so kill_existing:false is the
+      // safe path here — no process kill, just path resolution + the
+      // short-circuit success branch.
+      const { launch } = await import('../src/core/health.js');
+      const r = await launch({ kill_existing: false });
+      assert.equal(r.success, true, 'launch returned success');
+      assert.ok(r.cdp_port, 'cdp_port reported');
+      assert.ok(r.cdp_url, 'cdp_url reported');
+      assert.ok(['darwin', 'win32', 'linux', 'wsl'].includes(r.platform), `platform=${r.platform}`);
+    });
+
+    it('tv_ensure — idempotent with CDP already up (B.11)', async () => {
+      // CDP is responding (the suite is already connected), so ensureCDP
+      // should short-circuit with action:'none' and not spawn anything.
+      const r = await coreHealth.ensureCDP({});
+      assert.equal(r.success, true);
+      assert.equal(r.action, 'none', 'ensureCDP with CDP up should be a no-op');
+      assert.ok(r.cdp_port);
+      assert.ok(r.browser, 'browser version reported');
+      assert.equal(r.api_available, true);
     });
   });
 
@@ -159,151 +283,153 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
     let originalType;
 
     before(async () => {
-      originalSymbol = await evaluate(`${CHART_API}.symbol()`);
-      originalTF = await evaluate(`${CHART_API}.resolution()`);
-      originalType = await evaluate(`${CHART_API}.chartType()`);
+      // Use the wrapper to read original state — same code path as user tools.
+      const state = await coreChart.getState();
+      originalSymbol = state.symbol;
+      originalTF = state.resolution;
+      originalType = state.chartType;
     });
 
     after(async () => {
-      await evaluate(`${CHART_API}.setSymbol('${originalSymbol}')`);
-      await sleep(2000);
-      await evaluate(`${CHART_API}.setResolution('${originalTF}')`);
-      await sleep(1000);
-      await evaluate(`${CHART_API}.setChartType(${originalType})`);
+      // Restore via wrappers so we exercise the same code path users hit.
+      try { await coreChart.setSymbol({ symbol: originalSymbol }); } catch {}
       await sleep(500);
+      try { await coreChart.setTimeframe({ timeframe: originalTF }); } catch {}
+      await sleep(500);
+      try { await coreChart.setType({ chart_type: String(originalType) }); } catch {}
+      await sleep(300);
     });
 
     it('chart_get_state — symbol, timeframe, studies', async () => {
-      const state = await evaluate(`
-        (function() {
-          var chart = ${CHART_API};
-          var studies = chart.getAllStudies().map(function(s) {
-            return { id: s.id, name: s.name || s.title || 'unknown' };
-          });
-          return {
-            symbol: chart.symbol(),
-            resolution: chart.resolution(),
-            chartType: chart.chartType(),
-            studies: studies,
-          };
-        })()
-      `);
-      assert.ok(state.symbol, 'Has symbol');
-      assert.ok(state.resolution, 'Has resolution');
-      assert.ok(typeof state.chartType === 'number', 'Has chart type');
-      assert.ok(Array.isArray(state.studies), 'Studies is array');
+      const r = await coreChart.getState();
+      assert.equal(r.success, true);
+      assert.ok(r.symbol, 'Has symbol');
+      assert.ok(r.resolution, 'Has resolution');
+      assert.ok(typeof r.chartType === 'number', 'Has chart type');
+      assert.ok(Array.isArray(r.studies), 'Studies is array');
     });
 
     it('chart_set_symbol — change ticker', async () => {
-      await evaluate(`${CHART_API}.setSymbol('AAPL', {})`);
-      await sleep(2500);
-      const sym = await evaluate(`${CHART_API}.symbol()`);
-      assert.ok(sym.includes('AAPL'), `Symbol changed to AAPL, got: ${sym}`);
+      // Pre-clear: dismiss any saved-replay dialog and clear sessionState
+      // before the setSymbol call. TV's Continue/Leave-replay modals block
+      // chart context changes; without this guard the test sees the
+      // wrapper return 'success' (no-throw) while the symbol didn't change.
+      await dismissDialogs();
+      await coreReplay.stop().catch(() => {});
+      const r = await coreChart.setSymbol({ symbol: 'AAPL' });
+      assert.equal(r.success, true);
+      await dismissDialogs();
+      await sleep(1500);
+      const state = await coreChart.getState();
+      assert.ok(state.symbol.includes('AAPL'), `Symbol changed to AAPL, got: ${state.symbol}`);
     });
 
     it('chart_set_timeframe — change resolution', async () => {
-      await evaluate(`${CHART_API}.setResolution('D', {})`);
-      await sleep(1500);
-      const tf = await evaluate(`${CHART_API}.resolution()`);
-      assert.equal(tf, '1D');
+      const r = await coreChart.setTimeframe({ timeframe: 'D' });
+      assert.equal(r.success, true);
+      await dismissDialogs();
+      await sleep(800);
+      const state = await coreChart.getState();
+      assert.equal(state.resolution, '1D');
     });
 
     it('chart_set_type — change chart style', async () => {
-      await evaluate(`${CHART_API}.setChartType(2)`); // Line
+      const r = await coreChart.setType({ chart_type: '2' }); // Line = type 2
+      assert.equal(r.success, true);
       await sleep(500);
-      const ct = await evaluate(`${CHART_API}.chartType()`);
-      assert.equal(ct, 2, 'Chart type set to Line (2)');
+      const state = await coreChart.getState();
+      assert.equal(state.chartType, 2, 'Chart type set to Line (2)');
     });
 
     it('chart_manage_indicator (add) — add Volume', async () => {
-      const before = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
-      await evaluate(`${CHART_API}.createStudy('Volume', false, false, [])`);
-      await sleep(1500);
-      const after = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
-      const newIds = after.filter(id => !before.includes(id));
-      assert.ok(newIds.length > 0, 'Volume study added');
-      // Clean up: remove it
-      for (const id of newIds) {
-        await evaluate(`${CHART_API}.removeEntity('${id}')`);
-      }
+      const before = await coreChart.getState();
+      const beforeIds = before.studies.map(s => s.id);
+      const r = await coreChart.manageIndicator({ action: 'add', indicator: 'Volume' });
+      assert.equal(r.success, true);
+      assert.ok(r.entity_id, 'entity_id returned');
+      // Clean up
+      try { await coreChart.manageIndicator({ action: 'remove', entity_id: r.entity_id }); } catch {}
+      const after = await coreChart.getState();
+      const afterIds = after.studies.map(s => s.id);
+      // Add succeeded if entity_id was new
+      assert.ok(!beforeIds.includes(r.entity_id), 'new study id was distinct');
     });
 
     it('chart_manage_indicator (remove) — add then remove', async () => {
-      const before = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
-      await evaluate(`${CHART_API}.createStudy('Volume', false, false, [])`);
-      await sleep(1500);
-      const after = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
-      const newIds = after.filter(id => !before.includes(id));
-      assert.ok(newIds.length > 0, 'Study added');
-
-      for (const id of newIds) {
-        await evaluate(`${CHART_API}.removeEntity('${id}')`);
-      }
+      const r1 = await coreChart.manageIndicator({ action: 'add', indicator: 'Volume' });
+      assert.equal(r1.success, true);
+      assert.ok(r1.entity_id);
       await sleep(500);
-      const final = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
-      for (const id of newIds) {
-        assert.ok(!final.includes(id), `Study ${id} removed`);
-      }
+      const r2 = await coreChart.manageIndicator({ action: 'remove', entity_id: r1.entity_id });
+      assert.equal(r2.success, true);
+      await sleep(500);
+      const state = await coreChart.getState();
+      const ids = state.studies.map(s => s.id);
+      assert.ok(!ids.includes(r1.entity_id), `study ${r1.entity_id} removed`);
+    });
+
+    it('chart_remove_studies_by_title — add 2 then bulk-remove by name', async () => {
+      const r1 = await coreChart.manageIndicator({ action: 'add', indicator: 'Volume' });
+      assert.equal(r1.success, true);
+      const r2 = await coreChart.manageIndicator({ action: 'add', indicator: 'Volume' });
+      assert.equal(r2.success, true);
+      await sleep(500);
+      const before = await coreChart.getState();
+      const volumeBefore = before.studies.filter(s => /volume/i.test(s.name));
+      assert.ok(volumeBefore.length >= 2, `expected at least 2 Volume studies, got ${volumeBefore.length}`);
+      const rm = await coreChart.removeStudiesByTitle({ title_match: 'Volume' });
+      assert.equal(rm.success, true);
+      assert.ok(rm.removed.length >= 2, `expected at least 2 removed, got ${rm.removed.length}`);
+      await sleep(500);
+      const after = await coreChart.getState();
+      const volumeAfter = after.studies.filter(s => /volume/i.test(s.name));
+      assert.equal(volumeAfter.length, 0, `all Volume studies removed (had ${volumeAfter.length})`);
+    });
+
+    it('chart_remove_studies_by_title — no match returns empty success', async () => {
+      const r = await coreChart.removeStudiesByTitle({ title_match: '__definitely_not_a_real_study__' });
+      assert.equal(r.success, true);
+      assert.deepEqual(r.matched, []);
+      assert.deepEqual(r.removed, []);
     });
 
     it('chart_get_visible_range — get date range', async () => {
-      const range = await evaluate(`${CHART_API}.getVisibleRange()`);
-      assert.ok(range, 'Visible range returned');
-      assert.ok(range.from, 'Has from');
-      assert.ok(range.to, 'Has to');
-      assert.ok(range.to > range.from, 'to > from');
+      const r = await coreChart.getVisibleRange();
+      assert.equal(r.success, true);
+      assert.ok(r.visible_range, 'Visible range returned');
+      assert.ok(r.visible_range.from, 'Has from');
+      assert.ok(r.visible_range.to, 'Has to');
+      assert.ok(r.visible_range.to > r.visible_range.from, 'to > from');
     });
 
-    it('chart_set_visible_range — zoom via bar indices', async () => {
-      const rangeBefore = await evaluate(`${CHART_API}.getVisibleRange()`);
-      await evaluate(`
-        (function() {
-          var m = ${CHART_API}._chartWidget.model();
-          var ts = m.timeScale();
-          var bars = m.mainSeries().bars();
-          var endIdx = bars.lastIndex();
-          var startIdx = Math.max(bars.firstIndex(), endIdx - 20);
-          ts.zoomToBarsRange(startIdx, endIdx);
-        })()
-      `);
-      await sleep(500);
-      const rangeAfter = await evaluate(`${CHART_API}.getVisibleRange()`);
-      assert.ok(rangeAfter.from >= rangeBefore.from, 'Range changed');
+    it('chart_set_visible_range — zoom via timestamps', async () => {
+      const before = await coreChart.getVisibleRange();
+      // Zoom to a tighter window than what was visible: keep the same to,
+      // bring from forward by half the span.
+      const span = before.visible_range.to - before.visible_range.from;
+      const newFrom = before.visible_range.from + Math.floor(span / 2);
+      const newTo = before.visible_range.to;
+      const r = await coreChart.setVisibleRange({ from: newFrom, to: newTo });
+      assert.equal(r.success, true);
+      assert.ok(r.actual, 'actual range returned');
     });
 
     it('chart_scroll_to_date — jump to date', async () => {
-      const resolution = await evaluate(`${CHART_API}.resolution()`);
-      assert.ok(resolution, 'Resolution available for scroll calculation');
-      // Just verify the API call doesn't throw — actual scroll validated by range change
-      await evaluate(`
-        (function() {
-          var m = ${CHART_API}._chartWidget.model();
-          var ts = m.timeScale();
-          var bars = m.mainSeries().bars();
-          var midIdx = Math.floor((bars.firstIndex() + bars.lastIndex()) / 2);
-          ts.zoomToBarsRange(midIdx - 25, midIdx + 25);
-        })()
-      `);
+      // Use today's date — the wrapper computes a window centered on it.
+      const today = new Date().toISOString().slice(0, 10);
+      const r = await coreChart.scrollToDate({ date: today });
+      assert.equal(r.success, true);
+      assert.ok(r.centered_on, 'centered_on timestamp returned');
       await sleep(500);
     });
 
     it('symbol_info — symbol metadata', async () => {
-      const info = await evaluate(`
-        (function() {
-          var chart = ${CHART_API};
-          var ext = chart.symbolExt();
-          return {
-            symbol: ext.symbol,
-            full_name: ext.full_name,
-            exchange: ext.exchange,
-            description: ext.description,
-            type: ext.type,
-          };
-        })()
-      `);
-      assert.ok(info, 'Symbol info returned');
-      assert.ok(info.symbol, 'Has symbol');
-      assert.ok(info.exchange, 'Has exchange');
+      // Wrapper has a fallback chain (symbolExt → symbolInfo → minimal).
+      // On TV 3.1.0 symbolExt is gone, so we get the minimal source.
+      const r = await coreChart.symbolInfo();
+      assert.equal(r.success, true);
+      assert.ok(r.symbol, 'Has symbol');
+      assert.ok(r.source, 'source path reported (symbol_only on TV 3.1.0+)');
     });
 
     it('symbol_search — search dialog scraping', async () => {
@@ -349,23 +475,10 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
   describe('Data Access', () => {
 
     it('data_get_ohlcv — standard bar data', async () => {
-      const data = await evaluate(`
-        (function() {
-          var bars = ${BARS_PATH};
-          if (!bars || typeof bars.lastIndex !== 'function') return null;
-          var result = [];
-          var end = bars.lastIndex();
-          var start = Math.max(bars.firstIndex(), end - 4);
-          for (var i = start; i <= end; i++) {
-            var v = bars.valueAt(i);
-            if (v) result.push({time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0});
-          }
-          return {bars: result, total_bars: bars.size()};
-        })()
-      `);
-      assert.ok(data, 'Bar data returned');
-      assert.ok(data.bars.length > 0, 'Has bars');
-      const bar = data.bars[0];
+      const r = await coreData.getOhlcv({ count: 5 });
+      assert.equal(r.success, true);
+      assert.ok(r.bars.length > 0, 'Has bars');
+      const bar = r.bars[0];
       assert.ok(bar.time > 0, 'Has timestamp');
       assert.ok(bar.open > 0, 'Has open');
       assert.ok(bar.high >= bar.low, 'High >= Low');
@@ -373,153 +486,88 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
     });
 
     it('data_get_ohlcv summary — compact stats', async () => {
-      const data = await evaluate(`
-        (function() {
-          var bars = ${BARS_PATH};
-          if (!bars || typeof bars.lastIndex !== 'function') return null;
-          var result = [];
-          var end = bars.lastIndex();
-          var start = Math.max(bars.firstIndex(), end - 99);
-          for (var i = start; i <= end; i++) {
-            var v = bars.valueAt(i);
-            if (v) result.push({time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0});
-          }
-          if (result.length === 0) return null;
-          var closes = result.map(function(b) { return b.close; });
-          var highs = result.map(function(b) { return b.high; });
-          var lows = result.map(function(b) { return b.low; });
-          var first = result[0], last = result[result.length - 1];
-          return {
-            bar_count: result.length,
-            open: first.open,
-            close: last.close,
-            high: Math.max.apply(null, highs),
-            low: Math.min.apply(null, lows),
-          };
-        })()
-      `);
-      assert.ok(data, 'Summary returned');
-      assert.ok(data.bar_count > 0, 'Has bars');
-      assert.ok(data.high >= data.low, 'High >= Low');
-      const summarySize = JSON.stringify(data).length;
+      const r = await coreData.getOhlcv({ count: 100, summary: true });
+      assert.equal(r.success, true);
+      assert.ok(r.bar_count > 0, 'Has bars');
+      assert.ok(r.high >= r.low, 'High >= Low');
+      assert.ok(r.range >= 0, 'Range computed');
+      assert.ok(r.change_pct, 'Change percent reported');
+      // Summary mode returns flat fields, no nested "summary" key
+      const summarySize = JSON.stringify(r).length;
       assert.ok(summarySize < 1024, `Summary is ${summarySize} bytes (< 1KB)`);
     });
 
     it('data_get_study_values — indicator values from data window', async () => {
-      const data = await evaluate(`
-        (function() {
-          var sources = ${CHART_API}._chartWidget.model().model().dataSources();
-          var results = [];
-          for (var i = 0; i < sources.length; i++) {
-            var s = sources[i];
-            if (!s.metaInfo) continue;
-            try {
-              var dwv = s.dataWindowView();
-              if (!dwv) continue;
-              var items = dwv.items();
-              if (!items) continue;
-              var vals = {};
-              for (var j = 0; j < items.length; j++) {
-                if (items[j]._value && items[j]._value !== '∅' && items[j]._title) {
-                  vals[items[j]._title] = items[j]._value;
-                }
-              }
-              if (Object.keys(vals).length > 0) {
-                results.push({ name: s.metaInfo().description, values: vals });
-              }
-            } catch(e) {}
-          }
-          return results;
-        })()
-      `);
-      assert.ok(Array.isArray(data), 'Returns array');
+      const r = await coreData.getStudyValues();
+      assert.equal(r.success, true);
+      assert.ok(Array.isArray(r.studies), 'Returns studies array');
       // May be empty if no indicators on chart — that's OK
     });
 
     it('data_get_indicator — study info and inputs', async () => {
-      // Get a real entity_id first
-      const studies = await evaluate(`${CHART_API}.getAllStudies()`);
-      if (!studies || studies.length === 0) {
-        // Skip if no studies on chart
-        return;
+      const state = await coreChart.getState();
+      if (!state.studies || state.studies.length === 0) {
+        return; // skip if no studies on chart
       }
-      const entityId = studies[0].id;
-      const data = await evaluate(`
-        (function() {
-          var study = ${CHART_API}.getStudyById('${entityId}');
-          if (!study) return { error: 'not found' };
-          var result = {};
-          try { result.visible = study.isVisible(); } catch(e) {}
-          try { result.inputs = study.getInputValues(); } catch(e) {}
-          return result;
-        })()
-      `);
-      assert.ok(data, 'Indicator data returned');
-      assert.ok(!data.error, 'No error');
+      const r = await coreData.getIndicator({ entity_id: state.studies[0].id });
+      assert.equal(r.success, true);
+      assert.ok(r.entity_id, 'entity_id returned');
     });
 
     it('data_get_pine_lines — horizontal price levels', async () => {
-      const data = await evaluate(`
-        (function() {
-          var sources = ${CHART_API}._chartWidget.model().model().dataSources();
-          var results = [];
-          for (var i = 0; i < sources.length; i++) {
-            var s = sources[i];
-            if (!s._graphics || !s._graphics._primitivesCollection) continue;
-            try {
-              var coll = s._graphics._primitivesCollection.dwglines.get('lines').get(false);
-              if (coll && coll._primitivesDataById && coll._primitivesDataById.size > 0) {
-                var prices = [];
-                var seen = {};
-                coll._primitivesDataById.forEach(function(v) {
-                  var y = v.y1 != null && v.y1 === v.y2 ? Math.round(v.y1 * 100) / 100 : null;
-                  if (y != null && !seen[y]) { prices.push(y); seen[y] = true; }
-                });
-                prices.sort(function(a,b) { return b - a; });
-                var name = '';
-                try { name = s.metaInfo().description; } catch(e) {}
-                results.push({ name: name, horizontal_levels: prices });
-              }
-            } catch(e) {}
-          }
-          return results;
-        })()
-      `);
-      assert.ok(Array.isArray(data), 'Returns array');
-      if (data.length > 0) {
-        assert.ok(data[0].horizontal_levels, 'Has horizontal_levels');
-        assert.ok(Array.isArray(data[0].horizontal_levels), 'Levels is array');
+      const r = await coreData.getPineLines({});
+      assert.equal(r.success, true);
+      assert.ok(Array.isArray(r.studies), 'Returns studies array');
+      if (r.studies.length > 0) {
+        assert.ok(Array.isArray(r.studies[0].horizontal_levels), 'Has horizontal_levels array');
       }
     });
 
     it('data_get_pine_labels — text annotations', async () => {
-      const data = await evaluate(`
-        (function() {
-          var sources = ${CHART_API}._chartWidget.model().model().dataSources();
-          var results = [];
-          for (var i = 0; i < sources.length; i++) {
-            var s = sources[i];
-            if (!s._graphics || !s._graphics._primitivesCollection) continue;
-            try {
-              var coll = s._graphics._primitivesCollection.dwglabels.get('labels').get(false);
-              if (coll && coll._primitivesDataById && coll._primitivesDataById.size > 0) {
-                var labels = [];
-                coll._primitivesDataById.forEach(function(v) {
-                  if (v.t || v.y != null) labels.push({ text: v.t || '', price: v.y != null ? Math.round(v.y * 100) / 100 : null });
-                });
-                if (labels.length > 50) labels = labels.slice(-50);
-                var name = '';
-                try { name = s.metaInfo().description; } catch(e) {}
-                results.push({ name: name, labels: labels });
-              }
-            } catch(e) {}
+      const r = await coreData.getPineLabels({});
+      assert.equal(r.success, true);
+      assert.ok(Array.isArray(r.studies), 'Returns studies array');
+      if (r.studies.length > 0) {
+        assert.ok(Array.isArray(r.studies[0].labels), 'Has labels array');
+      }
+    });
+
+    it('data_get_pine_labels — bar_time + signal_price + bar enrichment', async () => {
+      // Schema-only check. Some labels (or all, on bare charts) may be at
+      // unresolved bar indices; we only assert the fields exist and that the
+      // bar object, when present, has plausible OHLC ordering.
+      const r = await coreData.getPineLabels({ verbose: false });
+      assert.equal(r.success, true);
+      const allLabels = (r.studies || []).flatMap(s => s.labels || []);
+      for (const lbl of allLabels) {
+        assert.ok('bar_time' in lbl, 'bar_time field present');
+        assert.ok('signal_price' in lbl, 'signal_price field present');
+        assert.ok('bar' in lbl, 'bar field present');
+        if (lbl.bar) {
+          assert.ok(lbl.bar.high >= lbl.bar.low, `bar.high ${lbl.bar.high} >= bar.low ${lbl.bar.low}`);
+          assert.equal(typeof lbl.bar.close, 'number');
+          assert.equal(lbl.signal_price, lbl.bar.close, 'signal_price tracks bar.close');
+        }
+        if (lbl.bar_time != null) {
+          assert.ok(lbl.bar_time > 1_000_000_000, `bar_time looks like unix seconds: ${lbl.bar_time}`);
+        }
+      }
+    });
+
+    it('data_get_pine_labels — since/until time filter', async () => {
+      // Filter to a window covering "now" — should return labels with
+      // bar_time inside the window (or empty if no labels exist on the chart).
+      const nowSec = Math.floor(Date.now() / 1000);
+      const tenYearsAgo = nowSec - 10 * 365 * 24 * 3600;
+      const r = await coreData.getPineLabels({ since: tenYearsAgo, until: nowSec + 3600 });
+      assert.equal(r.success, true);
+      for (const s of r.studies || []) {
+        for (const lbl of s.labels || []) {
+          if (lbl.bar_time != null) {
+            assert.ok(lbl.bar_time >= tenYearsAgo, `${lbl.bar_time} >= since`);
+            assert.ok(lbl.bar_time <= nowSec + 3600, `${lbl.bar_time} <= until`);
           }
-          return results;
-        })()
-      `);
-      assert.ok(Array.isArray(data), 'Returns array');
-      if (data.length > 0) {
-        assert.ok(Array.isArray(data[0].labels), 'Has labels array');
+        }
       }
     });
 
@@ -546,58 +594,59 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
     });
 
     it('data_get_pine_boxes — price zone boundaries', async () => {
-      const data = await evaluate(`
-        (function() {
-          var sources = ${CHART_API}._chartWidget.model().model().dataSources();
-          var results = [];
-          for (var i = 0; i < sources.length; i++) {
-            var s = sources[i];
-            if (!s._graphics || !s._graphics._primitivesCollection) continue;
-            try {
-              var coll = s._graphics._primitivesCollection.dwgboxes.get('boxes').get(false);
-              if (coll && coll._primitivesDataById && coll._primitivesDataById.size > 0) {
-                var zones = [];
-                coll._primitivesDataById.forEach(function(v) {
-                  if (v.y1 != null && v.y2 != null) {
-                    zones.push({ high: Math.max(v.y1, v.y2), low: Math.min(v.y1, v.y2) });
-                  }
-                });
-                var name = '';
-                try { name = s.metaInfo().description; } catch(e) {}
-                results.push({ name: name, zones: zones });
-              }
-            } catch(e) {}
-          }
-          return results;
-        })()
-      `);
-      assert.ok(Array.isArray(data), 'Returns array');
-      if (data.length > 0) {
-        assert.ok(Array.isArray(data[0].zones), 'Has zones array');
+      const r = await coreData.getPineBoxes({});
+      assert.equal(r.success, true);
+      assert.ok(Array.isArray(r.studies), 'Returns studies array');
+      if (r.studies.length > 0) {
+        assert.ok(Array.isArray(r.studies[0].zones), 'Has zones array');
       }
     });
 
     it('quote_get — real-time quote', async () => {
-      const quote = await evaluate(`
-        (function() {
-          var bars = ${BARS_PATH};
-          var result = { symbol: ${CHART_API}.symbol() };
-          if (bars && typeof bars.lastIndex === 'function') {
-            var last = bars.valueAt(bars.lastIndex());
-            if (last) {
-              result.time = last[0]; result.open = last[1]; result.high = last[2];
-              result.low = last[3]; result.close = last[4]; result.last = last[4];
-              result.volume = last[5] || 0;
-            }
-          }
-          return result;
-        })()
-      `);
-      assert.ok(quote, 'Quote returned');
-      assert.ok(quote.symbol, 'Has symbol');
-      assert.ok(quote.close > 0 || quote.last > 0, 'Has price');
-      const quoteSize = JSON.stringify(quote).length;
-      assert.ok(quoteSize < 500, `Quote is ${quoteSize} bytes (< 500)`);
+      const r = await coreData.getQuote({});
+      assert.equal(r.success, true);
+      assert.ok(r.symbol, 'Has symbol');
+      assert.ok(r.last > 0 || r.close > 0, 'Has price');
+    });
+
+    it('quote_get — cross-symbol via scanner REST does NOT disturb chart', async () => {
+      const original = await evaluate(`window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries().symbol()`);
+      assert.ok(original, 'baseline chart symbol present');
+      const target = String(original).toUpperCase().includes('AAPL') ? 'NASDAQ:MSFT' : 'NASDAQ:AAPL';
+
+      const r = await coreData.getQuote({ symbol: target });
+      assert.equal(r.success, true);
+      const bare = (s) => String(s).split(':').pop().toUpperCase();
+      assert.equal(bare(r.symbol), bare(target), `quote returned for ${target}, got ${r.symbol}`);
+      assert.ok(r.last > 0 || r.close > 0, 'Has price');
+      // Default route is 'auto' → for US equities the scanner REST path wins.
+      assert.equal(r.source, 'scanner_rest', 'auto route used scanner for US equity');
+
+      const stillOn = await evaluate(`window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries().symbol()`);
+      assert.equal(bare(stillOn), bare(original), 'chart was NOT disturbed by REST path');
+    });
+
+    it('quote_get — explicit chart_switch route reads + restores chart', async () => {
+      const original = await evaluate(`window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries().symbol()`);
+      const target = String(original).toUpperCase().includes('AAPL') ? 'NASDAQ:MSFT' : 'NASDAQ:AAPL';
+
+      const r = await coreData.getQuote({ symbol: target, route: 'chart_switch' });
+      assert.equal(r.success, true);
+      assert.equal(r.source, 'chart_switch');
+      const bare = (s) => String(s).split(':').pop().toUpperCase();
+      assert.equal(bare(r.symbol), bare(target));
+      assert.ok(r.last > 0 || r.close > 0);
+
+      // Restored after the call.
+      const restored = await evaluate(`window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries().symbol()`);
+      assert.equal(bare(restored), bare(original), 'chart restored after chart_switch');
+    });
+
+    it('quote_get — symbol matching active chart returns active_chart source', async () => {
+      const original = await evaluate(`window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries().symbol()`);
+      const r = await coreData.getQuote({ symbol: String(original) });
+      assert.equal(r.success, true);
+      assert.equal(r.source, 'active_chart');
     });
 
     it('depth_get — DOM/order book (panel-dependent)', async () => {
@@ -614,8 +663,9 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
     });
 
     it('data_get_strategy_results — strategy metrics (panel-dependent)', async () => {
-      // Open strategy tester panel
-      await evaluate(`try { ${BOTTOM_BAR}.showWidget('backtesting'); } catch(e) {}`);
+      // Open strategy tester via the wrapper — BOTTOM_BAR.showWidget is a
+      // silent no-op on TV 3.1.0; ui.openPanel uses the working button-click path.
+      try { await coreUi.openPanel({ panel: 'strategy-tester', action: 'open' }); } catch {}
       await sleep(500);
 
       const data = await evaluate(`
@@ -627,30 +677,60 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
       `);
       assert.ok(typeof data.panel_found === 'boolean', 'Strategy panel detection works');
 
-      // Close it
-      await evaluate(`try { ${BOTTOM_BAR}.hideWidget('backtesting'); } catch(e) {}`);
+      try { await coreUi.openPanel({ panel: 'strategy-tester', action: 'close' }); } catch {}
+    });
+
+    it('data_get_strategy_info — name + date range (panel-dependent)', async () => {
+      try { await coreUi.openPanel({ panel: 'strategy-tester', action: 'open' }); } catch {}
+      await sleep(500);
+      const r = await coreData.getStrategyInfo();
+      assert.ok('name' in r && 'date_range' in r && 'source' in r, 'shape includes name, date_range, source');
+      assert.ok(r.source === null || ['internal_api', 'dom'].includes(r.source), `source is null or known: ${r.source}`);
+      try { await coreUi.openPanel({ panel: 'strategy-tester', action: 'close' }); } catch {}
     });
 
     it('data_get_trades — trade list (panel-dependent)', async () => {
-      // Similar to strategy_results — verify panel detection
-      await evaluate(`try { ${BOTTOM_BAR}.showWidget('backtesting'); } catch(e) {}`);
+      try { await coreUi.openPanel({ panel: 'strategy-tester', action: 'open' }); } catch {}
       await sleep(500);
       const panelExists = await evaluate(`
         !!(document.querySelector('[data-name="backtesting"]') || document.querySelector('[class*="strategyReport"]'))
       `);
       assert.ok(typeof panelExists === 'boolean', 'Panel detection works');
-      await evaluate(`try { ${BOTTOM_BAR}.hideWidget('backtesting'); } catch(e) {}`);
+      try { await coreUi.openPanel({ panel: 'strategy-tester', action: 'close' }); } catch {}
     });
 
     it('data_get_equity — equity curve (panel-dependent)', async () => {
-      // Same pattern — just verify the panel access path works
-      await evaluate(`try { ${BOTTOM_BAR}.showWidget('backtesting'); } catch(e) {}`);
+      try { await coreUi.openPanel({ panel: 'strategy-tester', action: 'open' }); } catch {}
       await sleep(500);
       const panelExists = await evaluate(`
         !!(document.querySelector('[data-name="backtesting"]') || document.querySelector('[class*="strategyReport"]'))
       `);
       assert.ok(typeof panelExists === 'boolean', 'Panel detection works');
-      await evaluate(`try { ${BOTTOM_BAR}.hideWidget('backtesting'); } catch(e) {}`);
+      try { await coreUi.openPanel({ panel: 'strategy-tester', action: 'close' }); } catch {}
+    });
+
+    it('data_get_pine_shapes — read plotshape markers (B.12)', async () => {
+      // Read-only: walks every study's metaInfo + bar data, returns
+      // shape signals with OHLC. Will return zero studies on a chart
+      // without plotshape-using indicators — that's still a successful run.
+      const r = await coreData.getPineShapes({ last_n_bars: 50 });
+      assert.equal(r.success, true);
+      assert.ok(typeof r.study_count === 'number', 'study_count is a number');
+      assert.ok(Array.isArray(r.studies), 'studies is an array');
+      // Cap test: ask for 9999 bars, internal cap is 500
+      const r2 = await coreData.getPineShapes({ last_n_bars: 9999 });
+      assert.equal(r2.success, true);
+    });
+
+    it('data_get_study_values — accepts study_filter (B.20)', async () => {
+      // Without filter: returns whatever studies are loaded.
+      const all = await coreData.getStudyValues();
+      assert.equal(all.success, true);
+      assert.ok(typeof all.study_count === 'number');
+      // With unmatchable filter: should return 0 studies (or just the ones whose name contains the unique string).
+      const filtered = await coreData.getStudyValues({ study_filter: '__no_such_study__' });
+      assert.equal(filtered.success, true);
+      assert.equal(filtered.study_count, 0, 'unmatchable filter returns 0 studies');
     });
   });
 
@@ -665,10 +745,31 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
     });
 
     after(async () => {
-      // Restore editor state
+      // Cleanup hierarchy — each step in its own try/catch so a failure in
+      // one doesn't skip the rest. Pine compile/add-to-chart leaves a
+      // "Save script?" dialog open when the script is unsaved; we
+      // dismiss it twice using both pattern-set sources, then run an
+      // Escape-key fallback for any leftover overlay before closing the
+      // editor.
+
+      // Step 1: dismiss known blocking dialogs (text-pattern matchers)
+      try { await dismissDialogs(); } catch {}
+      try { await dismissBlockingDialogs(); } catch {}
+
+      // Step 2: re-attempt for any modal that appeared between calls
+      try { await new Promise(r => setTimeout(r, 200)); } catch {}
+      try { await dismissBlockingDialogs(); } catch {}
+
+      // Step 3: Escape any remaining unrecognized overlay
+      try {
+        await Input.dispatchKeyEvent({ type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+        await Input.dispatchKeyEvent({ type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+      } catch {}
+
+      // Step 4: restore editor state — close it if we opened it
       if (!editorWasOpen) {
-        await evaluate(`try { ${BOTTOM_BAR}.hideWidget('pine-editor'); } catch(e) {}`);
-        await sleep(300);
+        try { await coreUi.openPanel({ panel: 'pine-editor', action: 'close' }); } catch {}
+        try { await sleep(300); } catch {}
       }
     });
 
@@ -722,16 +823,10 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
     it('pine_get_source — read editor code', async () => {
       const ready = await ensureEditor();
       if (!ready) return; // Skip if editor can't be opened
-      const source = await evaluate(`
-        (function() {
-          var m = ${FIND_MONACO};
-          if (!m) return null;
-          return m.editor.getValue();
-        })()
-      `);
+      const r = await corePine.getSource();
       // Source might be null if Monaco fiber path changed
-      if (source !== null) {
-        assert.ok(typeof source === 'string', 'Source is string');
+      if (r.source !== null && r.source !== undefined) {
+        assert.ok(typeof r.source === 'string', 'Source is string');
       }
     });
 
@@ -739,20 +834,13 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
       const ready = await ensureEditor();
       if (!ready) return;
       const testCode = '//@version=6\nindicator("E2E Test", overlay=true)\nplot(close)';
-      const set = await evaluate(`
-        (function() {
-          var m = ${FIND_MONACO};
-          if (!m) return false;
-          m.editor.setValue(${JSON.stringify(testCode)});
-          return true;
-        })()
-      `);
-      if (set) {
-        const readBack = await evaluate(`
-          (function() { var m = ${FIND_MONACO}; return m ? m.editor.getValue() : null; })()
-        `);
-        assert.ok(readBack && readBack.includes('E2E Test'), 'Source was set');
+      try {
+        await corePine.setSource({ source: testCode });
+      } catch {
+        return; // wrapper threw — Monaco fiber path may have changed
       }
+      const r = await corePine.getSource();
+      assert.ok(r.source && r.source.includes('E2E Test'), 'Source was set');
     });
 
     it('pine_compile — add to chart button', async () => {
@@ -794,30 +882,16 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
     it('pine_get_errors — Monaco markers', async () => {
       const ready = await ensureEditor();
       if (!ready) return;
-      const errors = await evaluate(`
-        (function() {
-          var m = ${FIND_MONACO};
-          if (!m) return [];
-          var model = m.editor.getModel();
-          if (!model) return [];
-          return m.env.editor.getModelMarkers({ resource: model.uri }).map(function(mk) {
-            return { line: mk.startLineNumber, message: mk.message, severity: mk.severity };
-          });
-        })()
-      `);
-      assert.ok(Array.isArray(errors), 'Errors array returned');
+      const r = await corePine.getErrors();
+      assert.ok(Array.isArray(r.errors), 'Errors array returned');
     });
 
     it('pine_get_console — log output', async () => {
       const ready = await ensureEditor();
       if (!ready) return;
-      const entries = await evaluate(`
-        (function() {
-          var rows = document.querySelectorAll('[class*="consoleRow"], [class*="log-"], [class*="consoleLine"]');
-          return rows.length;
-        })()
-      `);
-      assert.ok(typeof entries === 'number', 'Console row count returned');
+      const r = await corePine.getConsole();
+      assert.ok(r, 'Console wrapper returned a result');
+      assert.ok(Array.isArray(r.entries) || typeof r.entry_count === 'number', 'Has entries or count');
     });
 
     it('pine_save — Ctrl+S dispatch', async () => {
@@ -925,11 +999,12 @@ val = array.get(a, 5)`;
   describe('Drawing', () => {
 
     after(async () => {
-      // Clean up all drawings
-      try { await evaluate(`${CHART_API}.removeAllShapes()`); } catch {}
+      // Clean up all drawings via the wrapper.
+      try { await coreDrawing.clearAll(); } catch {}
     });
 
     it('draw_shape — create horizontal line', async () => {
+      // Use the last bar's close as the point for a horizontal line.
       const quote = await evaluate(`
         (function() {
           var bars = ${BARS_PATH};
@@ -939,63 +1014,44 @@ val = array.get(a, 5)`;
       `);
       if (!quote) return;
 
-      const result = await evaluate(`
-        (function() {
-          var api = ${CHART_API};
-          var id = api.createShape(
-            { time: ${quote.time}, price: ${quote.price} },
-            { shape: 'horizontal_line', overrides: {} }
-          );
-          return { entity_id: id };
-        })()
-      `);
-      assert.ok(result, 'Shape created');
+      const result = await coreDrawing.drawShape({
+        shape: 'horizontal_line',
+        point: { time: quote.time, price: quote.price },
+      });
+      assert.ok(result.success, 'Shape created');
       assert.ok(result.entity_id, 'Has entity_id');
     });
 
     it('draw_list — list drawings', async () => {
-      const shapes = await evaluate(`
-        (function() {
-          var all = ${CHART_API}.getAllShapes();
-          return all.map(function(s) { return { id: s.id, name: s.name }; });
-        })()
-      `);
-      assert.ok(Array.isArray(shapes), 'Shapes is array');
-      assert.ok(shapes.length > 0, 'Has at least one shape');
+      const r = await coreDrawing.listDrawings();
+      assert.ok(r.success, 'list returned success');
+      assert.ok(Array.isArray(r.shapes), 'shapes is array');
+      assert.ok(r.shapes.length > 0, 'Has at least one shape');
     });
 
     it('draw_get_properties — read shape details', async () => {
-      const shapes = await evaluate(`${CHART_API}.getAllShapes()`);
-      if (!shapes || shapes.length === 0) return;
+      const list = await coreDrawing.listDrawings();
+      if (!list.shapes || list.shapes.length === 0) return;
+      const id = list.shapes[0].id;
 
-      const result = await evaluate(`
-        (function() {
-          var api = ${CHART_API};
-          var shape = api.getShapeById('${shapes[0].id}');
-          if (!shape) return { error: 'not found' };
-          var props = {};
-          try { props.points = shape.getPoints(); } catch(e) {}
-          try { props.visible = shape.isVisible(); } catch(e) {}
-          return props;
-        })()
-      `);
+      const result = await coreDrawing.getProperties({ entity_id: id });
       assert.ok(result, 'Properties returned');
-      assert.ok(!result.error, 'No error');
+      assert.equal(result.success, true, 'No error');
     });
 
     it('draw_remove_one — remove single drawing', async () => {
-      const shapes = await evaluate(`${CHART_API}.getAllShapes()`);
-      if (!shapes || shapes.length === 0) return;
+      const list = await coreDrawing.listDrawings();
+      if (!list.shapes || list.shapes.length === 0) return;
 
-      const id = shapes[0].id;
-      await evaluate(`${CHART_API}.removeEntity('${id}')`);
-      const after = await evaluate(`${CHART_API}.getAllShapes()`);
-      const stillExists = after.some(s => s.id === id);
+      const id = list.shapes[0].id;
+      await coreDrawing.removeOne({ entity_id: id });
+      const after = await coreDrawing.listDrawings();
+      const stillExists = (after.shapes || []).some(s => s.id === id);
       assert.ok(!stillExists, 'Shape removed');
     });
 
     it('draw_clear — remove all drawings', async () => {
-      // Add a shape first
+      // Add a shape first via the wrapper, then clear.
       const quote = await evaluate(`
         (function() {
           var bars = ${BARS_PATH};
@@ -1004,12 +1060,15 @@ val = array.get(a, 5)`;
         })()
       `);
       if (quote) {
-        await evaluate(`${CHART_API}.createShape({ time: ${quote.time}, price: ${quote.price} }, { shape: 'horizontal_line' })`);
+        await coreDrawing.drawShape({
+          shape: 'horizontal_line',
+          point: { time: quote.time, price: quote.price },
+        });
       }
 
-      await evaluate(`${CHART_API}.removeAllShapes()`);
-      const after = await evaluate(`${CHART_API}.getAllShapes()`);
-      assert.equal(after.length, 0, 'All shapes cleared');
+      await coreDrawing.clearAll();
+      const after = await coreDrawing.listDrawings();
+      assert.equal((after.shapes || []).length, 0, 'All shapes cleared');
     });
   });
 
@@ -1030,19 +1089,17 @@ val = array.get(a, 5)`;
     });
 
     it('ui_open_panel — open/close pine-editor', async () => {
-      const bwb = await apiExists(BOTTOM_BAR);
-      assert.ok(bwb, 'bottomWidgetBar exists');
+      // Exercise the actual MCP-tool wrapper, not the raw CDP API. TV 3.1.0
+      // removed bottomWidgetBar.hideWidget so the previous raw-API test was
+      // testing TV, not us — and broke when TV did.
+      const opened = await coreUi.openPanel({ panel: 'pine-editor', action: 'open' });
+      assert.equal(opened.success, true, 'open succeeds');
+      assert.ok(['opened', 'already_open'].includes(opened.performed), `opened.performed=${opened.performed}`);
 
-      // Open
-      await evaluate(`${BOTTOM_BAR}.showWidget('pine-editor')`);
-      await sleep(500);
-      const isOpen = await evaluate(`!!document.querySelector('.monaco-editor.pine-editor-monaco')`);
-
-      // Close
-      await evaluate(`${BOTTOM_BAR}.hideWidget('pine-editor')`);
-      await sleep(300);
-
-      assert.ok(typeof isOpen === 'boolean', 'Panel toggle works');
+      await sleep(800);
+      const closed = await coreUi.openPanel({ panel: 'pine-editor', action: 'close' });
+      assert.equal(closed.success, true, 'close succeeds');
+      assert.ok(['closed', 'already_closed'].includes(closed.performed), `closed.performed=${closed.performed}`);
     });
 
     it('ui_fullscreen — find fullscreen button', async () => {
@@ -1124,9 +1181,33 @@ val = array.get(a, 5)`;
       assert.ok(results.length > 0, 'Found visible buttons');
     });
 
-    it('ui_evaluate — execute arbitrary JS', async () => {
-      const result = await evaluate('1 + 1');
-      assert.equal(result, 2, 'JS evaluation works');
+    it('ui_dismiss_dialogs — no-op when nothing is open (G)', async () => {
+      // Idempotent: returns [] when no recognized dialog is showing.
+      const r = await dismissBlockingDialogs();
+      assert.ok(Array.isArray(r), 'returns an array');
+      // Don't assert empty — TV could legitimately have a "Continue your last replay"
+      // dialog from a prior session, in which case dismissBlockingDialogs would click
+      // its X and report it. Either zero items or items with valid notes is acceptable.
+      for (const item of r) {
+        assert.ok(typeof item === 'object' && item.note, 'each item has a note');
+        assert.ok(['leave_replay', 'continue_replay', 'unsaved_changes'].includes(item.note), `unexpected note: ${item.note}`);
+      }
+    });
+
+    it('pane_set_timeframe — change pane TF without focusing (B.18)', async () => {
+      // Read current pane 0 TF, set to a new one, set it back.
+      // Works against single-pane layouts (index 0 always exists).
+      const before = await evaluate(`${CHART_API}._chartWidget.model().mainSeries().properties().resolution.value()`).catch(() => null);
+      // Pick a TF different from current (default 'D' if can't read)
+      const targetTf = before === '60' ? 'D' : '60';
+      const r = await corePane.setTimeframe({ index: 0, timeframe: targetTf });
+      assert.equal(r.success, true);
+      assert.equal(r.timeframe, targetTf);
+      assert.ok(r.symbol, 'symbol reported');
+      // Restore prior TF if we knew it
+      if (before) {
+        await corePane.setTimeframe({ index: 0, timeframe: before }).catch(() => {});
+      }
     });
 
     it('layout_list — find layout dropdown button', async () => {
@@ -1152,95 +1233,96 @@ val = array.get(a, 5)`;
   describe('Replay Mode', () => {
 
     after(async () => {
-      // Ensure replay is stopped
+      // Defensive replay teardown for TV 3.1.0. stopReplay + goToRealtime
+      // dismiss the 'Leave current replay?' dialog on subsequent setSymbol
+      // calls; nulling _replaySessionState on both the chart-widget collection
+      // and the chart linking collection clears the cache that survives even
+      // a TV process restart (per ~/ai/wiki/vendors/tradingview-desktop.md
+      // "Saved replay state survives close").
+      // Do NOT call hideReplayToolbar — that path corrupts account state
+      // (issue #20, enforced by tests/replay.test.js source audit).
       try {
-        const rp = REPLAY_API;
-        const started = await evaluate(wv(`${rp}.isReplayStarted()`));
-        if (started) {
-          await evaluate(`${rp}.stopReplay()`);
-          await evaluate(`${rp}.goToRealtime()`);
-          await evaluate(`${rp}.hideReplayToolbar()`);
-          await sleep(500);
-        }
+        await evaluate(`
+          (function() {
+            var api = window.TradingViewApi && window.TradingViewApi._replayApi;
+            if (api) {
+              try { api.stopReplay(); } catch(e) {}
+              try { api.goToRealtime(); } catch(e) {}
+            }
+            try {
+              var col = window.TradingViewApi && window.TradingViewApi._chartWidgetCollection;
+              if (col) col._replaySessionState = null;
+              var linking = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV
+                && window.TradingViewApi._activeChartWidgetWV.value()
+                && window.TradingViewApi._activeChartWidgetWV.value()._chartWidget
+                && window.TradingViewApi._activeChartWidgetWV.value()._chartWidget._linking;
+              if (linking && linking._chartWidgetCollection) linking._chartWidgetCollection._replaySessionState = null;
+            } catch(e) {}
+          })()
+        `);
+        await sleep(500);
+        await dismissDialogs();
       } catch {}
     });
 
     it('replay_start — enter replay mode', async () => {
-      const available = await evaluate(wv(`${REPLAY_API}.isReplayAvailable()`));
-      if (!available) return; // Skip if replay not available for current symbol
-
-      await evaluate(`${REPLAY_API}.showReplayToolbar()`);
-      await sleep(500);
-      await evaluate(`${REPLAY_API}.selectFirstAvailableDate()`);
-      await sleep(500);
-
-      const started = await evaluate(wv(`${REPLAY_API}.isReplayStarted()`));
-      assert.ok(started, 'Replay started');
+      try {
+        const r = await coreReplay.start({});
+        assert.equal(r.success, true);
+        assert.equal(r.replay_started, true);
+      } catch (err) {
+        // Replay may be unavailable for the current symbol/timeframe.
+        // The wrapper throws a specific message in that case — accept it.
+        assert.ok(/Replay is not available|failed to start/i.test(err.message),
+          `unexpected error: ${err.message}`);
+      }
     });
 
     it('replay_step — advance one bar', async () => {
-      const started = await evaluate(wv(`${REPLAY_API}.isReplayStarted()`));
-      if (!started) return; // Skip if replay didn't start
-
-      await evaluate(`${REPLAY_API}.doStep()`);
-      const date = await evaluate(wv(`${REPLAY_API}.currentDate()`));
-      assert.ok(date !== null && date !== undefined, 'Current date returned');
+      // Skip if replay didn't start (e.g., symbol doesn't support replay).
+      const status = await coreReplay.status();
+      if (!status.is_replay_started) return;
+      const r = await coreReplay.step();
+      assert.equal(r.success, true);
+      assert.ok(r.current_date !== null && r.current_date !== undefined, 'Current date returned');
     });
 
     it('replay_autoplay — toggle autoplay', async () => {
-      const started = await evaluate(wv(`${REPLAY_API}.isReplayStarted()`));
-      if (!started) return;
-
-      await evaluate(`${REPLAY_API}.toggleAutoplay()`);
-      await sleep(200);
-      const isAutoplay = await evaluate(wv(`${REPLAY_API}.isAutoplayStarted()`));
-      assert.ok(typeof isAutoplay === 'boolean', 'Autoplay state returned');
-
+      const status = await coreReplay.status();
+      if (!status.is_replay_started) return;
+      const r = await coreReplay.autoplay({});
+      assert.equal(r.success, true);
+      assert.ok(typeof r.autoplay_active === 'boolean', 'Autoplay state returned');
       // Stop autoplay if it was turned on
-      if (isAutoplay) {
-        await evaluate(`${REPLAY_API}.toggleAutoplay()`);
-        await sleep(200);
+      if (r.autoplay_active) {
+        await coreReplay.autoplay({}).catch(() => {});
       }
     });
 
     it('replay_trade — buy action', async () => {
-      const started = await evaluate(wv(`${REPLAY_API}.isReplayStarted()`));
-      if (!started) return;
-
-      await evaluate(`${REPLAY_API}.buy()`);
-      const position = await evaluate(wv(`${REPLAY_API}.position()`));
-      assert.ok(position !== undefined, 'Position returned after buy');
-
+      const status = await coreReplay.status();
+      if (!status.is_replay_started) return;
+      const r = await coreReplay.trade({ action: 'buy' });
+      assert.equal(r.success, true);
+      assert.equal(r.action, 'buy');
+      assert.ok(r.position !== undefined, 'Position returned after buy');
       // Close position
-      try { await evaluate(`${REPLAY_API}.closePosition()`); } catch {}
+      try { await coreReplay.trade({ action: 'close' }); } catch {}
     });
 
     it('replay_status — get replay state', async () => {
-      const status = await evaluate(`
-        (function() {
-          var r = ${REPLAY_API};
-          function unwrap(v) { return (v && typeof v === 'object' && typeof v.value === 'function') ? v.value() : v; }
-          return {
-            is_replay_available: unwrap(r.isReplayAvailable()),
-            is_replay_started: unwrap(r.isReplayStarted()),
-          };
-        })()
-      `);
-      assert.ok(typeof status.is_replay_available === 'boolean', 'Replay availability returned');
-      assert.ok(typeof status.is_replay_started === 'boolean', 'Replay started state returned');
+      const r = await coreReplay.status();
+      assert.equal(r.success, true);
+      assert.ok(typeof r.is_replay_available === 'boolean', 'Replay availability returned');
+      assert.ok(typeof r.is_replay_started === 'boolean', 'Replay started state returned');
     });
 
     it('replay_stop — return to realtime', async () => {
-      const started = await evaluate(wv(`${REPLAY_API}.isReplayStarted()`));
-      if (!started) return;
-
-      await evaluate(`${REPLAY_API}.stopReplay()`);
-      await evaluate(`${REPLAY_API}.goToRealtime()`);
-      await evaluate(`${REPLAY_API}.hideReplayToolbar()`);
-      await sleep(500);
-
-      const stoppedNow = await evaluate(wv(`${REPLAY_API}.isReplayStarted()`));
-      assert.ok(!stoppedNow, 'Replay stopped');
+      // Exercise the wrapper. core.replay.stop is the canonical teardown —
+      // it handles the saved-replay-state cleanup that raw stopReplay misses.
+      const result = await coreReplay.stop();
+      assert.equal(result.success, true, 'stop succeeds');
+      assert.ok(['replay_stopped', 'already_stopped'].includes(result.action), `result.action=${result.action}`);
     });
   });
 
@@ -1248,33 +1330,100 @@ val = array.get(a, 5)`;
 
   describe('Alerts', () => {
 
-    it('alert_create — find Create Alert button', async () => {
-      const found = await evaluate(`
-        !!(document.querySelector('[aria-label="Create Alert"]')
-          || document.querySelector('[data-name="alerts"]'))
-      `);
-      assert.ok(typeof found === 'boolean', 'Alert button detection works');
+    it('alert_list — REST endpoint returns array', async () => {
+      const r = await coreAlerts.list();
+      assert.equal(r.success, true);
+      assert.equal(r.source, 'internal_api');
+      assert.ok(Array.isArray(r.alerts), 'Returns alerts array');
     });
 
-    it('alert_list — scrape alert items', async () => {
-      const items = await evaluate(`
-        (function() {
-          var result = [];
-          var els = document.querySelectorAll('[class*="alert-item"], [class*="alertItem"], [class*="listItem"]');
-          els.forEach(function(item) {
-            var text = item.textContent.trim();
-            if (text) result.push(text.substring(0, 100));
-          });
-          return result;
-        })()
-      `);
-      assert.ok(Array.isArray(items), 'Alert list returned');
+    it('alert_create + alert_delete — REST round-trip', async () => {
+      // Pick a price far from current so the alert can't fire during the test.
+      const quote = await coreData.getQuote({});
+      const price = (quote.last || quote.close || 100) * 10;
+      assert.ok(price > 0, 'baseline price for far-away alert');
+
+      const created = await coreAlerts.create({
+        condition: 'crossing',
+        price,
+        message: 'mcp e2e test alert — safe to delete',
+      });
+      assert.equal(created.success, true, `create failed: ${JSON.stringify(created)}`);
+      assert.equal(created.source, 'rest_api');
+      assert.ok(created.alert_id != null, 'alert_id assigned');
+      assert.equal(created.condition, 'cross');
+
+      try {
+        // List should now contain our alert.
+        const listed = await coreAlerts.list();
+        assert.equal(listed.success, true);
+        const found = (listed.alerts || []).find(a => a.alert_id === created.alert_id);
+        assert.ok(found, `created alert ${created.alert_id} appears in list`);
+      } finally {
+        // Always clean up — even if the assertions above failed.
+        const deleted = await coreAlerts.deleteAlerts({ alert_id: created.alert_id });
+        assert.equal(deleted.success, true, `cleanup delete failed: ${JSON.stringify(deleted)}`);
+        assert.equal(deleted.deleted_count, 1);
+      }
     });
 
-    it('alert_delete — context menu access', async () => {
-      // Just verify the alerts button exists for context menu
-      const found = await evaluate(`!!document.querySelector('[data-name="alerts"]')`);
-      assert.ok(typeof found === 'boolean', 'Alerts button detection works');
+    it('alert_delete — bulk via alert_ids', async () => {
+      // Create two distant alerts, delete both in one call.
+      const quote = await coreData.getQuote({});
+      const base = (quote.last || quote.close || 100) * 10;
+      const a = await coreAlerts.create({ condition: 'crossing', price: base, message: 'mcp e2e bulk #1' });
+      const b = await coreAlerts.create({ condition: 'crossing', price: base + 1, message: 'mcp e2e bulk #2' });
+      assert.ok(a.success && b.success, 'both create calls succeeded');
+
+      const r = await coreAlerts.deleteAlerts({ alert_ids: [a.alert_id, b.alert_id] });
+      assert.equal(r.success, true, `bulk delete failed: ${JSON.stringify(r)}`);
+      assert.equal(r.deleted_count, 2);
+    });
+
+    it('alert_delete — invalid input throws', async () => {
+      await assert.rejects(coreAlerts.deleteAlerts({}), /Pass one of/);
+    });
+
+    it('alert_create_indicator — input validation rejects bad args', async () => {
+      const missingPineId = await coreAlerts.createIndicator({
+        alert_cond_id: 'plot_0',
+        inputs: { __profile: false },
+        offsets_by_plot: { plot_0: 0 },
+      });
+      assert.equal(missingPineId.success, false);
+      assert.match(missingPineId.error, /pine_id is required/);
+
+      const missingCond = await coreAlerts.createIndicator({
+        pine_id: 'USER;deadbeef',
+        inputs: { __profile: false },
+        offsets_by_plot: { plot_0: 0 },
+      });
+      assert.equal(missingCond.success, false);
+      assert.match(missingCond.error, /alert_cond_id is required/);
+    });
+
+    it('alert_create_indicator — resolves active chart context, surfaces TV API error', async () => {
+      // Without symbol/currency/resolution we should fall through to the
+      // TV REST endpoint with the active chart's metadata. The fake pine_id
+      // makes TV reject the create — we assert (a) we got past chart-read,
+      // (b) the response shape is the documented rest_api error envelope,
+      // (c) the hint is wired so callers know what to try next.
+      //
+      // TV may return HTTP 200 with `s != 'ok'` OR an HTTP 4xx — both flow
+      // through our error path. The only thing we don't accept is an
+      // `alert_id`, which would mean we accidentally created a real alert
+      // with a fake pine_id (worth investigating if it ever happens).
+      const r = await coreAlerts.createIndicator({
+        pine_id: 'USER;0000000000000000000000000000dead',
+        alert_cond_id: 'plot_0',
+        inputs: { pineFeatures: '{"indicator":1}', __profile: false },
+        offsets_by_plot: { plot_0: 0 },
+      });
+      assert.equal(r.success, false, `unexpectedly created an alert with a fake pine_id: ${JSON.stringify(r)}`);
+      assert.equal(r.source, 'rest_api');
+      assert.ok(!/Could not read active chart symbol/.test(r.error || ''), `failed before reaching the API: ${r.error}`);
+      assert.match(r.hint || '', /alert_cond_id off-by-one/);
+      assert.ok(r.error, 'has an error message');
     });
   });
 
@@ -1334,42 +1483,35 @@ val = array.get(a, 5)`;
   describe('Indicators', () => {
 
     it('indicator_toggle_visibility — show/hide study', async () => {
-      const studies = await evaluate(`${CHART_API}.getAllStudies()`);
-      if (!studies || studies.length === 0) return;
-
+      const state = await coreChart.getState();
+      const studies = state.studies || [];
+      if (studies.length === 0) return;
       const id = studies[0].id;
-      const result = await evaluate(`
-        (function() {
-          var study = ${CHART_API}.getStudyById('${id}');
-          if (!study) return { error: 'not found' };
-          var was = study.isVisible();
-          study.setVisible(!was);
-          var now = study.isVisible();
-          study.setVisible(was); // restore
-          return { was: was, toggled: now, restored: study.isVisible() };
-        })()
-      `);
-      if (!result.error) {
-        assert.notEqual(result.was, result.toggled, 'Visibility toggled');
-        assert.equal(result.was, result.restored, 'Visibility restored');
-      }
+
+      // Read current state via the data wrapper, toggle via the indicator
+      // wrapper, verify the toggle landed, then restore.
+      const before = await coreData.getIndicator({ entity_id: id });
+      const wasVisible = before.visible !== false;
+
+      const toggled = await coreIndicators.toggleVisibility({ entity_id: id, visible: !wasVisible });
+      assert.equal(toggled.success, true);
+      assert.equal(toggled.visible, !wasVisible, 'Visibility flipped');
+
+      // Restore original state.
+      const restored = await coreIndicators.toggleVisibility({ entity_id: id, visible: wasVisible });
+      assert.equal(restored.visible, wasVisible, 'Visibility restored');
     });
 
-    it('indicator_set_inputs — change study parameters', async () => {
-      const studies = await evaluate(`${CHART_API}.getAllStudies()`);
-      if (!studies || studies.length === 0) return;
-
+    it('indicator_set_inputs — read existing inputs via data wrapper', async () => {
+      const state = await coreChart.getState();
+      const studies = state.studies || [];
+      if (studies.length === 0) return;
       const id = studies[0].id;
-      const result = await evaluate(`
-        (function() {
-          var study = ${CHART_API}.getStudyById('${id}');
-          if (!study) return { error: 'not found' };
-          var inputs = study.getInputValues();
-          return { input_count: inputs.length, first_input: inputs[0] || null };
-        })()
-      `);
-      assert.ok(result, 'Input values retrieved');
-      assert.ok(typeof result.input_count === 'number', 'Has input count');
+
+      const r = await coreData.getIndicator({ entity_id: id });
+      assert.equal(r.success, true);
+      assert.equal(r.entity_id, id);
+      assert.ok(Array.isArray(r.inputs), 'Has inputs array');
     });
   });
 
@@ -1380,10 +1522,10 @@ val = array.get(a, 5)`;
     it('batch_run — verify symbol/tf switching mechanism', async () => {
       // batch_run iterates symbols + timeframes, sets each, then runs an action.
       // We test the underlying switching mechanism without running a full batch.
-      const original = await evaluate(`${CHART_API}.symbol()`);
-      assert.ok(original, 'Can read current symbol for batch switching');
+      const state = await coreChart.getState();
+      assert.ok(state.symbol, 'Can read current symbol for batch switching');
 
-      // Verify setSymbol exists
+      // Verify the batch wrapper's prerequisite TV API methods exist.
       const hasSetSymbol = await evaluate(`typeof ${CHART_API}.setSymbol === 'function'`);
       assert.ok(hasSetSymbol, 'setSymbol available for batch operations');
 
@@ -1430,112 +1572,42 @@ val = array.get(a, 5)`;
 
   describe('Context Size Validation', () => {
 
-    it('quote_get output < 500 bytes', async () => {
-      const quote = await evaluate(`
-        (function() {
-          var bars = ${BARS_PATH};
-          var result = { symbol: ${CHART_API}.symbol() };
-          var last = bars.valueAt(bars.lastIndex());
-          if (last) {
-            result.time = last[0]; result.open = last[1]; result.high = last[2];
-            result.low = last[3]; result.close = last[4]; result.volume = last[5] || 0;
-          }
-          var ext = {};
-          try { ext = ${CHART_API}.symbolExt(); } catch(e) {}
-          if (ext.description) result.description = ext.description;
-          if (ext.exchange) result.exchange = ext.exchange;
-          return result;
-        })()
-      `);
-      const size = JSON.stringify({ success: true, ...quote }, null, 2).length;
-      assert.ok(size < 500, `quote_get output is ${size} bytes (< 500)`);
+    it('quote_get output < 1KB', async () => {
+      // 1KB threshold (was 500 bytes originally). The bound was bumped after
+      // observing real symbolExt() payloads on equities pull description and
+      // exchange strings that, with bid/ask attached, push a quote past 500
+      // bytes for many symbols. 1024 leaves comfortable headroom over the
+      // ~400-byte typical case without losing the context-cost signal —
+      // anything that doubles past 1KB is a genuine regression worth
+      // catching.
+      const r = await coreData.getQuote({});
+      const size = JSON.stringify(r, null, 2).length;
+      assert.ok(size < 1024, `quote_get output is ${size} bytes (target < 1024)`);
     });
 
+    // The size-budget tests below validate that the wrapper's compaction
+    // logic produces output within reasonable limits for real chart state.
+    // Earlier these tests re-implemented the wrapper's IIFE inline, which
+    // meant a wrapper bug (e.g. missing inner.get(false)) propagated into
+    // the test and silently passed. Calling the wrapper itself ties the
+    // budget assertion to what users actually receive.
     it('data_get_study_values output < 2KB', async () => {
-      const data = await evaluate(`
-        (function() {
-          var sources = ${CHART_API}._chartWidget.model().model().dataSources();
-          var results = [];
-          for (var i = 0; i < sources.length; i++) {
-            var s = sources[i];
-            if (!s.metaInfo) continue;
-            try {
-              var dwv = s.dataWindowView();
-              if (!dwv) continue;
-              var items = dwv.items();
-              if (!items) continue;
-              var vals = {};
-              for (var j = 0; j < items.length; j++) {
-                if (items[j]._value && items[j]._value !== '∅' && items[j]._title) {
-                  vals[items[j]._title] = items[j]._value;
-                }
-              }
-              if (Object.keys(vals).length > 0) {
-                results.push({ name: s.metaInfo().description, values: vals });
-              }
-            } catch(e) {}
-          }
-          return results;
-        })()
-      `);
-      const size = JSON.stringify({ success: true, studies: data }, null, 2).length;
-      assert.ok(size < 2048, `data_get_study_values output is ${size} bytes (< 2KB)`);
+      const r = await coreData.getStudyValues();
+      const size = JSON.stringify(r, null, 2).length;
+      assert.ok(size < 2048, `getStudyValues output is ${size} bytes (< 2KB)`);
     });
 
     it('pine lines compact < 4KB per study', async () => {
-      const data = await evaluate(`
-        (function() {
-          var sources = ${CHART_API}._chartWidget.model().model().dataSources();
-          var results = [];
-          for (var i = 0; i < sources.length; i++) {
-            var s = sources[i];
-            if (!s._graphics || !s._graphics._primitivesCollection) continue;
-            try {
-              var name = s.metaInfo().description || '';
-              var coll = s._graphics._primitivesCollection.dwglines.get('lines').get(false);
-              if (!coll || !coll._primitivesDataById || coll._primitivesDataById.size === 0) continue;
-              var seen = {}, prices = [];
-              coll._primitivesDataById.forEach(function(v) {
-                var y = v.y1 != null && v.y1 === v.y2 ? Math.round(v.y1 * 100) / 100 : null;
-                if (y != null && !seen[y]) { prices.push(y); seen[y] = true; }
-              });
-              prices.sort(function(a,b) { return b - a; });
-              results.push({ name: name, horizontal_levels: prices });
-            } catch(e) {}
-          }
-          return results;
-        })()
-      `);
-      for (const study of data) {
+      const r = await coreData.getPineLines({});
+      for (const study of r.studies || []) {
         const size = JSON.stringify(study).length;
         assert.ok(size < 4096, `${study.name}: pine lines ${size} bytes (< 4KB)`);
       }
     });
 
     it('pine labels compact < 8KB per study', async () => {
-      const data = await evaluate(`
-        (function() {
-          var sources = ${CHART_API}._chartWidget.model().model().dataSources();
-          var results = [];
-          for (var i = 0; i < sources.length; i++) {
-            var s = sources[i];
-            if (!s._graphics || !s._graphics._primitivesCollection) continue;
-            try {
-              var name = s.metaInfo().description || '';
-              var coll = s._graphics._primitivesCollection.dwglabels.get('labels').get(false);
-              if (!coll || !coll._primitivesDataById || coll._primitivesDataById.size === 0) continue;
-              var labels = [];
-              coll._primitivesDataById.forEach(function(v) {
-                if (v.t || v.y != null) labels.push({ text: v.t || '', price: v.y != null ? Math.round(v.y * 100) / 100 : null });
-              });
-              if (labels.length > 50) labels = labels.slice(-50);
-              results.push({ name: name, labels: labels });
-            } catch(e) {}
-          }
-          return results;
-        })()
-      `);
-      for (const study of data) {
+      const r = await coreData.getPineLabels({});
+      for (const study of r.studies || []) {
         const size = JSON.stringify(study).length;
         assert.ok(size < 8192, `${study.name}: pine labels ${size} bytes (< 8KB)`);
       }

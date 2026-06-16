@@ -3,6 +3,7 @@
 # Usage: ./scripts/launch_tv_debug_mac.sh [port]
 
 PORT="${1:-9222}"
+LOG_FILE="${TMPDIR:-/tmp}/tradingview-mcp-desktop.log"
 
 # Auto-detect TradingView install location
 APP=""
@@ -49,7 +50,8 @@ sleep 1
 
 echo "Found TradingView at: $APP"
 echo "Launching with --remote-debugging-port=$PORT ..."
-"$APP" --remote-debugging-port=$PORT &
+echo "TradingView app logs: $LOG_FILE"
+"$APP" --remote-debugging-port=$PORT > "$LOG_FILE" 2>&1 &
 TV_PID=$!
 echo "PID: $TV_PID"
 

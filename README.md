@@ -1,5 +1,14 @@
 # TradingView MCP Bridge
 
+[![CI](https://github.com/iliaal/tradingview-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/iliaal/tradingview-mcp/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/github/v/release/iliaal/tradingview-mcp?v=1.0.0)](https://github.com/iliaal/tradingview-mcp/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Node.js 18+](https://img.shields.io/badge/node-18%2B-green?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Platform: macOS · Windows · Linux](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-lightgrey)](#prerequisites)
+[![Follow @iliaa](https://img.shields.io/badge/Follow-@iliaa-000000?style=flat&logo=x&logoColor=white)](https://x.com/intent/follow?screen_name=iliaa)
+
+![tradingview-mcp: bridge Claude Code to TradingView Desktop](images/tradingview-mcp-hero.jpg)
+
 Personal AI assistant for your TradingView Desktop charts. Connects Claude Code to your locally running TradingView app via Chrome DevTools Protocol for AI-assisted chart analysis, Pine Script development, and workflow automation.
 
 > [!WARNING]
@@ -16,7 +25,7 @@ Personal AI assistant for your TradingView Desktop charts. Connects Claude Code 
 
 ## How It Works (and why it's safe to run)
 
-This tool does not connect to TradingView's servers, modify any TradingView files, or intercept any network traffic. It communicates exclusively with your locally running TradingView Desktop instance via Chrome DevTools Protocol (CDP) — a standard debugging interface built into all Chromium/Electron applications by Google, including VS Code, Slack, and Discord.
+This tool does not connect to TradingView's servers, modify any TradingView files, or intercept any network traffic. It communicates exclusively with your locally running TradingView Desktop instance via Chrome DevTools Protocol (CDP), a standard debugging interface built into all Chromium/Electron applications by Google, including VS Code, Slack, and Discord.
 
 The debug port is disabled by default and must be explicitly enabled by you using a standard Chromium flag (`--remote-debugging-port=9222`). Nothing happens without that deliberate step.
 
@@ -52,36 +61,36 @@ See [RESEARCH.md](RESEARCH.md) for open questions, findings, and related work.
 - **Claude Code** with MCP support (for MCP tools) or any terminal (for CLI)
 - **macOS, Windows, or Linux**
 
-## What It Does
+## ✨ What It Does
 
 Gives your AI assistant eyes and hands on your own chart:
 
-- **Pine Script development** — write, inject, compile, debug, and iterate on scripts with AI assistance
-- **Chart navigation** — change symbols, timeframes, zoom to dates, add/remove indicators
-- **Visual analysis** — read your chart's indicator values, price levels, and annotations
-- **Draw on charts** — trend lines, horizontal lines, rectangles, text annotations
-- **Manage alerts** — create, list, and delete price alerts
-- **Replay practice** — step through historical bars, practice entries/exits
-- **Screenshots** — capture chart state for AI visual analysis
-- **Multi-pane layouts** — set up 2x2, 3x1, etc. grids with different symbols per pane
-- **Monitor your chart** — stream JSONL from your locally running chart for local monitoring scripts
-- **CLI access** — every MCP tool is also a `tv` CLI command, pipe-friendly with JSON output
-- **Launch TradingView** — auto-detect and launch with debug mode from any platform
+- **Pine Script development**: write, inject, compile, debug, and iterate on scripts with AI assistance
+- **Chart navigation**: change symbols, timeframes, zoom to dates, add/remove indicators
+- **Visual analysis**: read your chart's indicator values, price levels, and annotations
+- **Draw on charts**: trend lines, horizontal lines, rectangles, text annotations
+- **Manage alerts**: create, list, and delete price alerts
+- **Replay practice**: step through historical bars, practice entries/exits
+- **Screenshots**: capture chart state for AI visual analysis
+- **Multi-pane layouts**: set up 2x2, 3x1, etc. grids with different symbols per pane
+- **Monitor your chart**: stream JSONL from your locally running chart for local monitoring scripts
+- **CLI access**: every MCP tool is also a `tv` CLI command, pipe-friendly with JSON output
+- **Launch TradingView**: auto-detect and launch with debug mode from any platform
 
-## Install with Claude Code
+## 🚀 Install with Claude Code
 
 Paste this into Claude Code and it will handle the rest:
 
-> Install the TradingView MCP server. Clone https://github.com/tradesdontlie/tradingview-mcp.git, run npm install, add it to my MCP config at ~/.claude/.mcp.json, and launch TradingView with the debug port. Then verify the connection with tv_health_check.
+> Install the TradingView MCP server. Clone https://github.com/iliaal/tradingview-mcp.git, run npm install, register it with `claude mcp add tradingview --scope user -- node <repo>/src/server.js`, and launch TradingView with the debug port. Then verify the connection with tv_health_check.
 
 Or follow the manual steps below.
 
-## Quick Start
+## 🛠️ Quick Start
 
 ### 1. Install
 
 ```bash
-git clone https://github.com/tradesdontlie/tradingview-mcp.git
+git clone https://github.com/iliaal/tradingview-mcp.git
 cd tradingview-mcp
 npm install
 ```
@@ -115,7 +124,16 @@ scripts\launch_tv_debug.bat
 
 ### 3. Add to Claude Code
 
-Add to your Claude Code MCP config (`~/.claude/.mcp.json` or project `.mcp.json`):
+Easiest — let the CLI write the config for you:
+
+```bash
+claude mcp add tradingview --scope user -- node /path/to/tradingview-mcp/src/server.js
+```
+
+Or edit the config by hand. Claude Code reads MCP servers from one of two locations (not `~/.claude/.mcp.json` — that path is ignored):
+
+- **User scope:** `~/.claude.json`, under the top-level `mcpServers` key.
+- **Project scope:** `<project-root>/.mcp.json`.
 
 ```json
 {
@@ -134,7 +152,7 @@ Replace `/path/to/tradingview-mcp` with your actual path.
 
 Ask Claude: *"Use tv_health_check to verify TradingView is connected"*
 
-## CLI
+## 💻 CLI
 
 Every MCP tool is also accessible as a `tv` CLI command. All output is JSON for piping with `jq`.
 
@@ -163,20 +181,22 @@ tv stream quote | jq '.close'      # monitor price changes
 ### All Commands
 
 ```
-tv status / launch / state / symbol / timeframe / type / info / search
+tv status / launch / ensure / reconnect / state / symbol / timeframe / type / info / search
 tv quote / ohlcv / values
-tv data lines/labels/tables/boxes/strategy/trades/equity/depth/indicator
-tv pine get/set/compile/analyze/check/save/new/open/list/errors/console
-tv draw shape/list/get/remove/clear
-tv alert list/create/delete
-tv watchlist get/add
-tv indicator add/remove/toggle/set/get
+tv data lines/labels/tables/boxes/shapes/strategy/trades/equity/depth/indicator
+tv pine get/set/compile/raw-compile/analyze/check/save/new/open/list/switch/deploy/publish-inspect/errors/console
+tv draw shape/position/list/get/remove/clear
+tv alert list/create/create-for-list/delete
+tv watchlist get/add/add-bulk/remove/upload/delete/share
+tv indicator set/toggle
 tv layout list/switch
-tv pane list/layout/focus/symbol
-tv tab list/new/close/switch
-tv replay start/step/stop/status/autoplay/trade
+tv pane list/layout/focus/symbol/timeframe/read-batch
+tv tab list/new/close/switch/pin/unpin/registry
+tv replay start/step/stop/status/autoplay/trade/set-resolution
 tv stream quote/bars/values/lines/labels/tables/all
-tv ui click/keyboard/hover/scroll/find/eval/type/panel/fullscreen/mouse
+tv ui click/keyboard/hover/scroll/find/type/panel/fullscreen/mouse
+tv hotlist / screener / news / snapshot
+tv strategy set-deep-bt-range
 tv screenshot / discover / ui-state / range / scroll
 ```
 
@@ -215,20 +235,23 @@ Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project
 | "Draw a level at 24500" | `draw_shape` (horizontal_line) |
 | "Take a screenshot" | `capture_screenshot` |
 
-## Tool Reference (78 MCP tools)
+## Tool Reference (108 MCP tools)
 
 ### Chart Reading
 
 | Tool | When to use | Output size |
 |------|------------|-------------|
-| `chart_get_state` | First call — get symbol, timeframe, all indicator names + IDs | ~500B |
+| `chart_get_state` | First call: get symbol, timeframe, all indicator names + IDs | ~500B |
 | `data_get_study_values` | Read current RSI, MACD, BB, EMA values from all indicators | ~500B |
+| `data_get_multi_timeframe` | Iterate a list of timeframes and read indicator values + price summary on each (top-down analysis) | ~1-2KB |
+| `data_detect_candlestick_patterns` | Native scan over OHLC for 17 classic patterns (doji, hammer, engulfing, stars, soldiers/crows) | ~1-3KB |
 | `quote_get` | Get latest price, OHLC, volume | ~200B |
 | `data_get_ohlcv` | Get price bars. **Use `summary: true`** for compact stats | 500B (summary) / 8KB (100 bars) |
+| `depth_get` | DOM / order book bid/ask levels (panel must be open) | ~1KB |
 
 ### Custom Indicator Data (Pine Drawings)
 
-Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any visible Pine indicator.
+Read `line.new()`, `label.new()`, `table.new()`, `box.new()`, `plotshape()` output from any visible Pine indicator.
 
 | Tool | When to use | Output size |
 |------|------------|-------------|
@@ -236,8 +259,36 @@ Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any vis
 | `data_get_pine_labels` | Read text annotations + prices ("PDH 24550", "Bias Long") | ~2-5KB |
 | `data_get_pine_tables` | Read data tables (session stats, analytics dashboards) | ~1-4KB |
 | `data_get_pine_boxes` | Read price zones / ranges as {high, low} pairs | ~1-2KB |
+| `data_get_pine_shapes` | Read `plotshape()` / `plotchar()` markers with bar OHLC + timestamp | ~2-4KB |
+| `pane_read_batch` | Single call: read pine_lines/labels/tables/boxes/study_values/ohlcv/drawings across all panes | ~4-10KB |
 
 **Always use `study_filter`** to target a specific indicator: `study_filter: "Profiler"`.
+
+### Strategy Data
+
+Read backtest results from a Pine Script strategy on the chart. The Strategy Tester panel must be open (use `ui_open_panel`).
+
+| Tool | What it reads |
+|------|---------------|
+| `data_get_strategy_results` | Strategy performance metrics (net profit, win rate, drawdown, etc.) |
+| `data_get_strategy_info` | Active strategy name + Strategy Tester date range — sanity-check before reading metrics |
+| `data_get_trades` | Individual trade list with entry/exit, P&L per trade |
+| `data_get_equity` | Equity curve data points |
+| `strategy_set_deep_bt_range` | Set the Deep Backtesting date range via the Strategy Tester calendar picker |
+
+### News & Signals
+
+| Tool | What it does |
+|------|-------------|
+| `news_get_ticker` | Latest ticker-specific headlines (Nasdaq + Yahoo Finance RSS) with keyword sentiment scoring. Index symbols (SPX, NDX, DJI, RUT, VIX) auto-route to their tracking ETF |
+| `signal_get_snapshot` | Compact one-shot bundle: quote + 100-bar price action (SMA20/50, ATR14, %change) + volume-vs-avg + visible indicator values + latest news with sentiment. Sections degrade gracefully |
+
+### Screener
+
+| Tool | What it does |
+|------|-------------|
+| `screener_scan` | Scan TradingView screeners (stocks, ETFs, crypto, forex, futures, indices) via the public scanner endpoint. Market presets, keyword search, explicit ticker hydration, exchange + numeric range filters |
+| `hotlist_get` | Fetch a TradingView US hotlist (volume_gainers, gap_gainers, percent_change_gainers/losers, etc.) — up to 20 symbols, no auth |
 
 ### Chart Control
 
@@ -247,10 +298,13 @@ Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any vis
 | `chart_set_timeframe` | Change resolution (1, 5, 15, 60, D, W, M) |
 | `chart_set_type` | Change style (Candles, HeikinAshi, Line, Area, Renko) |
 | `chart_manage_indicator` | Add/remove indicators. **Use full names**: "Relative Strength Index" not "RSI" |
+| `chart_remove_studies_by_title` | Remove all studies whose name contains a case-insensitive substring (bulk cleanup of duplicates) |
 | `chart_scroll_to_date` | Jump to a date (ISO: "2025-01-15") |
 | `chart_set_visible_range` | Zoom to exact range (unix timestamps) |
+| `chart_get_visible_range` | Read the current visible date range and bars range |
 | `symbol_info` / `symbol_search` | Symbol metadata and search |
 | `indicator_set_inputs` / `indicator_toggle_visibility` | Change indicator settings, show/hide |
+| `data_get_indicator` | Read inputs + visibility for a specific indicator by entity_id |
 
 ### Multi-Pane Layouts
 
@@ -260,29 +314,43 @@ Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any vis
 | `pane_set_layout` | Change grid: `s`, `2h`, `2v`, `2x2`, `4`, `6`, `8` |
 | `pane_focus` | Focus a specific pane by index |
 | `pane_set_symbol` | Set symbol on any pane |
+| `pane_set_timeframe` | Set timeframe on a specific pane without focusing it |
+| `pane_read_batch` | Read multiple data types across all panes in one call (see Custom Indicator Data) |
 
 ### Tab Management
 
 | Tool | What it does |
 |------|-------------|
-| `tab_list` | List open chart tabs |
+| `tab_list` | List open chart tabs (includes active Pine script name per tab) |
 | `tab_new` / `tab_close` | Open/close tabs |
 | `tab_switch` | Switch to a tab by index |
+| `tab_switch_by_name` | Switch by Pine script name (exact match → substring fallback) |
+| `tab_pin` | Pin the MCP to one specific tab so every call deterministically targets it (cross-instance registry at `~/.tv-mcp-registry.json`) |
+| `tab_unpin` | Clear the tab pin and release the registry claim |
+| `tab_registry` | Read-only view of the cross-instance pin registry — check before `tab_pin` |
 
 ### Pine Script Development
 
 | Tool | Step |
 |------|------|
 | `pine_set_source` | 1. Inject code into editor |
-| `pine_smart_compile` | 2. Compile with auto-detection + error check |
+| `pine_compile` | 2a. Manually click "Add to chart" / "Update on chart" |
+| `pine_smart_compile` | 2b. Compile with auto-detection + error check (returns `elapsed_ms`) |
 | `pine_get_errors` | 3. Read compilation errors if any |
 | `pine_get_console` | 4. Read log.info() output |
 | `pine_save` | 5. Save to TradingView cloud |
+| `pine_save_as` | Save current source as a new script under a different name |
+| `pine_rename` | Rename the currently open script |
+| `pine_delete` | Delete a saved script by name |
+| `pine_switch_script` | Switch the editor to a different saved script |
+| `pine_version_history` | Open TV's "Version history" dialog for the current script |
 | `pine_get_source` | Read current script (**warning: can be 200KB+ for complex scripts**) |
 | `pine_new` | Create blank indicator/strategy/library |
 | `pine_open` / `pine_list_scripts` | Open or list saved scripts |
 | `pine_analyze` | Offline static analysis (no chart needed) |
 | `pine_check` | Server-side compile check (no chart needed) |
+| `pine_deploy` | One-shot deploy from a `.pine` file on disk: `pine_set_source` + `pine_save` + `pine_smart_compile`, with auto-derived pre-clean of any prior chart instance. Source is never embedded in the call — no token tax on big scripts |
+| `pine_publish_dialog_inspect` | **Read-only** probe of the "Publish script" dialog — dumps every input/button/heading with class names + label text for selector discovery. Does not submit |
 
 ### Replay Mode
 
@@ -293,21 +361,76 @@ Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any vis
 | `replay_autoplay` | Auto-advance (set speed in ms) |
 | `replay_trade` | Buy/sell/close positions |
 | `replay_status` | Check position, P&L, date |
+| `replay_set_resolution` | Change replay resolution while paused |
 | `replay_stop` | Return to realtime |
 
-### Drawing, Alerts, UI Automation
+### Drawing
 
 | Tool | What it does |
 |------|-------------|
 | `draw_shape` | Draw horizontal_line, trend_line, rectangle, text |
-| `draw_list` / `draw_remove_one` / `draw_clear` | Manage drawings |
-| `alert_create` / `alert_list` / `alert_delete` | Manage price alerts |
-| `capture_screenshot` | Screenshot (regions: full, chart, strategy_tester) |
-| `batch_run` | Run action across multiple symbols/timeframes |
-| `watchlist_get` / `watchlist_add` | Read/modify watchlist |
+| `draw_position` | Draw an entry + stop-loss + take-profit risk box |
+| `draw_list` | List all drawings on the chart |
+| `draw_get_properties` | Read points, visibility, lock state for a specific drawing |
+| `draw_remove_one` | Remove a drawing by entity_id |
+| `draw_clear` | Remove all drawings |
+
+### Alerts
+
+| Tool | What it does |
+|------|-------------|
+| `alert_create` | Create a price alert via TV's create-alert dialog |
+| `alert_create_for_watchlist` | Create an alert that applies to every symbol on a watchlist |
+| `alert_create_indicator` | Create an indicator alert that fires on a Pine `alertcondition()` signal (e.g. strategy BUY/SELL → webhook). Posts to the `pricealerts` REST API |
+| `alert_list` | List active alerts (uses the pricealerts REST API) |
+| `alert_delete` | Delete one or all alerts |
+
+### Watchlist
+
+| Tool | What it does |
+|------|-------------|
+| `watchlist_get` | Read current watchlist with last/change/change% |
+| `watchlist_add` | Add a single symbol |
+| `watchlist_add_bulk` | Add multiple symbols in one dialog session |
+| `watchlist_remove` | Remove one or more symbols |
+| `watchlist_upload` | Upload/import a local TradingView watchlist text file |
+| `watchlist_delete` | Delete a watchlist by name |
+| `watchlist_get_share_link` | Get a shareable watchlist link, enabling sharing if needed |
+
+### UI Automation
+
+| Tool | What it does |
+|------|-------------|
+| `ui_open_panel` | Open/close/toggle panels (pine-editor, strategy-tester, watchlist, alerts, trading) |
+| `ui_click` | Click a UI element by aria-label, data-name, text, or class substring |
+| `ui_keyboard` | Press keyboard keys or shortcuts (Enter, Escape, Alt+S, Ctrl+Z) |
+| `ui_type_text` | Type text into the focused input |
+| `ui_hover` | Hover over an element |
+| `ui_scroll` | Scroll the chart up/down/left/right |
+| `ui_mouse_click` | Click at specific x,y coordinates |
+| `ui_find_element` | Find UI elements and return positions |
+| `ui_fullscreen` | Toggle fullscreen |
+| `ui_dismiss_dialogs` | Detect and dismiss blocking modals (Leave-replay, unsaved-changes, Save-script) |
 | `layout_list` / `layout_switch` | Manage saved layouts |
-| `ui_open_panel` / `ui_click` / `ui_evaluate` | UI automation |
-| `tv_launch` / `tv_health_check` / `tv_discover` | Connection management |
+| `capture_screenshot` | Screenshot (regions: full, chart, strategy_tester) |
+
+### Connection Management
+
+| Tool | What it does |
+|------|-------------|
+| `tv_launch` | Launch TradingView Desktop with CDP enabled (auto-detects binary on Mac/Windows/Linux/WSL/MSIX) |
+| `tv_ensure` | Idempotent: no-op if CDP is up; relaunches if needed. Call before any tool when unsure |
+| `tv_health_check` | Verify CDP connection and report current chart state |
+| `tv_network_check` | Check reachability for TradingView data/search/Pine endpoints |
+| `tv_ui_state` | Snapshot of which panels/buttons are open and visible |
+| `tv_discover` | Report which TV API paths are available |
+| `tv_reconnect` | Reload the TV page to reclaim a stale Desktop session |
+
+### Batch Operations
+
+| Tool | What it does |
+|------|-------------|
+| `batch_run` | Run an action (`screenshot` / `get_ohlcv` / `get_strategy_results`) across multiple symbols × timeframes |
 
 ## Context Management
 
@@ -351,7 +474,7 @@ npm test
 Claude Code  ←→  MCP Server (stdio)  ←→  CDP (port 9222)  ←→  TradingView Desktop (Electron)
 ```
 
-- **Transport**: MCP over stdio (78 tools) + CLI (`tv` command, 30 commands with 66 subcommands)
+- **Transport**: MCP over stdio (108 tools) + CLI (`tv` command, pipe-friendly JSON output)
 - **Connection**: Chrome DevTools Protocol on localhost:9222
 - **Streaming**: Poll-and-diff loop with deduplication, JSONL output to stdout
 - **No dependencies** beyond `@modelcontextprotocol/sdk` and `chrome-remote-interface`
@@ -359,8 +482,8 @@ Claude Code  ←→  MCP Server (stdio)  ←→  CDP (port 9222)  ←→  Tradin
 ## Attributions
 
 This project is not affiliated with, endorsed by, or associated with:
-- **TradingView Inc.** — TradingView is a trademark of TradingView Inc.
-- **Anthropic** — Claude and Claude Code are trademarks of Anthropic, PBC.
+- **TradingView Inc.**: TradingView is a trademark of TradingView Inc.
+- **Anthropic**: Claude and Claude Code are trademarks of Anthropic, PBC.
 
 This tool is an independent MCP server that connects to Claude Code via the standard MCP protocol. It does not contain or modify any Anthropic software.
 
@@ -389,6 +512,10 @@ By using this software, you acknowledge and agree that:
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+MIT. See [LICENSE](LICENSE) for details.
 
 The MIT license applies to the source code of this project only. It does not grant any rights to TradingView's software, data, trademarks, or intellectual property.
+
+---
+
+[Follow @iliaa on X](https://x.com/iliaa) • [Blog](https://ilia.ws) • If this gave your AI agent eyes on your chart, ⭐ star it!

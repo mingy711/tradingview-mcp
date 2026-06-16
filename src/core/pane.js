@@ -2,9 +2,16 @@
  * Core pane/layout management logic.
  * Controls multi-chart layouts (split panes) in TradingView.
  */
-import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString } from '../connection.js';
 
 const CWC = 'window.TradingViewApi._chartWidgetCollection';
+
+function _resolve(deps) {
+  return {
+    evaluate: deps?.evaluate || _evaluate,
+    evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
+  };
+}
 
 const LAYOUT_NAMES = {
   's': '1 chart',
@@ -30,7 +37,8 @@ const LAYOUT_NAMES = {
 /**
  * List all panes in the current layout with their symbols and index.
  */
-export async function list() {
+export async function list({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const result = await evaluate(`
     (function() {
       var cwc = ${CWC};
@@ -79,7 +87,8 @@ export async function list() {
  * Set the chart layout grid.
  * @param {string} layout - Layout code: s, 2h, 2v, 2-1, 1-2, 3h, 3v, 4, 6, 8, etc.
  */
-export async function setLayout({ layout }) {
+export async function setLayout({ layout, _deps }) {
+  const { evaluateAsync } = _resolve(_deps);
   const code = layout.toLowerCase().replace(/\s+/g, '');
 
   // Map friendly names to codes
@@ -99,7 +108,7 @@ export async function setLayout({ layout }) {
   await evaluateAsync(`${CWC}.setLayout(${safeString(resolved)})`);
   await new Promise(r => setTimeout(r, 500));
 
-  const state = await list();
+  const state = await list({ _deps });
   return {
     success: true,
     layout: resolved,
@@ -112,14 +121,19 @@ export async function setLayout({ layout }) {
 /**
  * Focus a specific pane by index.
  */
-export async function focus({ index }) {
+export async function focus({ index, _deps }) {
+  const { evaluate } = _resolve(_deps);
   const idx = Number(index);
+  if (!Number.isInteger(idx) || idx < 0) {
+    throw new Error(`Pane index must be a non-negative integer; got ${JSON.stringify(index)}`);
+  }
   const result = await evaluate(`
     (function() {
       var cwc = ${CWC};
       var all = cwc.getAll();
-      if (${idx} >= all.length) return { error: 'Pane index ' + ${idx} + ' out of range (have ' + all.length + ' panes)' };
+      if (${idx} < 0 || ${idx} >= all.length) return { error: 'Pane index ' + ${idx} + ' out of range (have ' + all.length + ' panes)' };
       var chart = all[${idx}];
+      if (!chart) return { error: 'Pane index ' + ${idx} + ' resolved to undefined' };
       // Click the main div to activate it
       if (chart._mainDiv) chart._mainDiv.click();
       return { focused: ${idx}, total: all.length };
@@ -127,30 +141,89 @@ export async function focus({ index }) {
   `);
 
   if (result?.error) throw new Error(result.error);
+  // _activeChartWidgetWV updates asynchronously after the click; subsequent
+  // calls that read CHART_API will hit the previous pane without this delay.
+  await new Promise(r => setTimeout(r, 300));
   return { success: true, focused_index: result.focused, total_panes: result.total };
 }
 
 /**
- * Set the symbol on a specific pane by index.
- * Works by focusing the pane, then using the active chart's setSymbol.
+ * Set the timeframe on a specific pane by index without focusing it.
+ * Calls the pane's mainSeries().setResolution(tf) directly via the chart
+ * widget collection. Skips the focus → setResolution → unfocus dance,
+ * useful when prepping a multi-pane grid without disturbing the active
+ * pane's user state.
  */
-export async function setSymbol({ index, symbol }) {
+export async function setTimeframe({ index, timeframe, _deps }) {
+  const { evaluate } = _resolve(_deps);
   const idx = Number(index);
-
-  // Focus the target pane first
-  await focus({ index: idx });
-  await new Promise(r => setTimeout(r, 300));
-
-  // Now set symbol on the now-active chart
-  await evaluateAsync(`
+  if (!Number.isInteger(idx) || idx < 0) {
+    throw new Error(`Pane index must be a non-negative integer; got ${JSON.stringify(index)}`);
+  }
+  const result = await evaluate(`
     (function() {
-      var chart = window.TradingViewApi._activeChartWidgetWV.value();
+      var cwc = ${CWC};
+      var all = cwc.getAll();
+      if (${idx} < 0 || ${idx} >= all.length) return { error: 'Pane index ' + ${idx} + ' out of range (have ' + all.length + ' panes)' };
+      var chart = all[${idx}];
+      if (!chart) return { error: 'Pane index ' + ${idx} + ' resolved to undefined' };
+      try {
+        // TV 3.1.0 exposes setResolution on the chart widget itself, not on
+        // its mainSeries. ttnsx888's original used mainSeries.setResolution
+        // which throws "setResolution is not a function" on current builds.
+        chart.setResolution(${safeString(timeframe)});
+        var sym = '';
+        try { sym = chart.model().mainSeries().symbol(); } catch(e) {}
+        return { index: ${idx}, timeframe: ${safeString(timeframe)}, symbol: sym };
+      } catch(e) {
+        return { error: 'setResolution failed: ' + e.message };
+      }
+    })()
+  `);
+
+  if (result?.error) throw new Error(result.error);
+  await new Promise(r => setTimeout(r, 300));
+  return { success: true, index: result.index, timeframe: result.timeframe, symbol: result.symbol };
+}
+
+/**
+ * Set the symbol on a specific pane by index.
+ *
+ * Resolves the target chart by index directly inside the eval — the
+ * previous implementation focused the pane, waited, then read
+ * `_activeChartWidgetWV.value()`, which raced under concurrent calls
+ * (two callers focusing different panes within the wait window both
+ * applied their symbol to whichever pane focus landed on last). The
+ * direct-by-index lookup matches the setTimeframe() pattern and removes
+ * the race entirely.
+ */
+export async function setSymbol({ index, symbol, _deps }) {
+  const { evaluateAsync } = _resolve(_deps);
+  const idx = Number(index);
+  if (!Number.isInteger(idx) || idx < 0) {
+    throw new Error(`Pane index must be a non-negative integer; got ${JSON.stringify(index)}`);
+  }
+
+  const result = await evaluateAsync(`
+    (function() {
+      var cwc = ${CWC};
+      var all = cwc.getAll();
+      if (${idx} < 0 || ${idx} >= all.length) {
+        return Promise.resolve({ error: 'Pane index ' + ${idx} + ' out of range (have ' + all.length + ' panes)' });
+      }
+      var chart = all[${idx}];
+      if (!chart) return Promise.resolve({ error: 'Pane index ' + ${idx} + ' resolved to undefined' });
       return new Promise(function(resolve) {
-        chart.setSymbol(${safeString(symbol)}, {});
-        setTimeout(resolve, 500);
+        try {
+          chart.setSymbol(${safeString(symbol)}, {});
+          setTimeout(function() { resolve({ ok: true }); }, 500);
+        } catch (e) {
+          resolve({ error: 'setSymbol failed: ' + e.message });
+        }
       });
     })()
   `);
 
+  if (result?.error) throw new Error(result.error);
   return { success: true, index: idx, symbol };
 }

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { boolish } from './_validation.js';
 import { jsonResult } from './_format.js';
 import * as core from '../core/pine.js';
 
@@ -70,6 +71,40 @@ export function registerPineTools(server) {
     source: z.string().describe('Pine Script source code to compile/validate'),
   }, async ({ source }) => {
     try { return jsonResult(await core.check({ source })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('pine_switch_script', 'Switch the Pine editor to a different saved script via the Ctrl+O picker. Properly switches editor context (title button + script binding) — unlike pine_open which only rewrites the source via Monaco.', {
+    name: z.string().describe('Name of the script to switch to'),
+  }, async ({ name }) => {
+    try { return jsonResult(await core.switchScript({ name })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('pine_save_as', 'Save the current Pine script as a new file (copy). Reopens the new copy so subsequent saves go to it instead of the original. Refuses if a script with that name already exists unless overwrite is true.', {
+    name: z.string().describe('Name for the new copy'),
+    overwrite: boolish.optional().describe('Replace an existing script with the same name (default false — a name collision is refused so an unrelated script is never silently overwritten).'),
+  }, async ({ name, overwrite }) => {
+    try { return jsonResult(await core.saveAs({ name, overwrite })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('pine_rename', 'Rename the currently open Pine script via the pine-facade REST API.', {
+    name: z.string().describe('New name for the script'),
+  }, async ({ name }) => {
+    try { return jsonResult(await core.renameScript({ name })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('pine_version_history', 'Open the Version history dialog for the currently active Pine script.', {}, async () => {
+    try { return jsonResult(await core.versionHistory()); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('pine_delete', 'Delete a saved Pine script by name via pine-facade REST API. The Recently Used list refreshes on next TV reload.', {
+    name: z.string().describe('Name of the script to delete'),
+  }, async ({ name }) => {
+    try { return jsonResult(await core.deleteScript({ name })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 }

@@ -1,21 +1,74 @@
 /**
  * Core data access logic.
  */
-import { evaluate, evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
+import { setTimeframe as _setTimeframe, setSymbol as _setSymbol } from './chart.js';
+import { waitForChartReady as _waitForChartReady } from '../wait.js';
+import { detectPatternsInBars, KNOWN_PATTERNS } from './patterns.js';
+
+function _resolve(deps) {
+  return {
+    evaluate: deps?.evaluate || _evaluate,
+    evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
+    setSymbol: deps?.setSymbol || _setSymbol,
+    waitForChartReady: deps?.waitForChartReady || _waitForChartReady,
+  };
+}
+
+// Normalize "EXCHANGE:TICKER" to bare ticker for equality checks. Quote
+// callers pass tickers many ways ("AAPL", "NASDAQ:AAPL"); the chart's
+// symbol() may return either form. Stripping the prefix avoids redundant
+// chart switches when the requested symbol is already loaded.
+function _bareSymbol(s) {
+  return String(s || '').split(':').pop().toUpperCase();
+}
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
 const CHART_API = KNOWN_PATHS.chartApi;
 const BARS_PATH = KNOWN_PATHS.mainSeriesBars;
 
-function buildGraphicsJS(collectionName, mapKey, filter) {
+// Page-side cap on the number of items returned per study. Labels can have
+// thousands of entries on long Pine scripts; serializing them all over CDP
+// just to drop them server-side wastes time and memory. We keep the LAST N
+// (matching formatPineLabels' slice(-limit) intent) and report the full
+// `count` separately so callers know how much was truncated.
+const DEFAULT_GRAPHICS_ITEM_CAP = 5000;
+
+function buildGraphicsJS(collectionName, mapKey, filter, maxItems, includeEmpty) {
+  const cap = Math.max(1, Number(maxItems) || DEFAULT_GRAPHICS_ITEM_CAP);
+  const incEmpty = includeEmpty ? 'true' : 'false';
   return `
     (function() {
       var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
       var model = chart.model();
       var sources = model.model().dataSources();
+      var mainBars = null;
+      try { mainBars = chart.model().mainSeries().bars(); } catch(e) {}
+      function barValueAt(barIdx) {
+        if (typeof barIdx !== 'number') return null;
+        if (!mainBars || typeof mainBars.valueAt !== 'function') return null;
+        try { return mainBars.valueAt(barIdx) || null; } catch(e) { return null; }
+      }
+      function barTimeAt(barIdx) { var v = barValueAt(barIdx); return v ? v[0] : null; }
+      function barOhlcvAt(barIdx) {
+        var v = barValueAt(barIdx);
+        if (!v) return null;
+        return { time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0 };
+      }
+      // Drawing primitives store v.x as a sequence number into the study's
+      // _indexes array, NOT a chart bar index. Resolve via _indexes[seq] before
+      // calling barValueAt — same lookup TV's internal _materializePrimitive does.
+      // Filter sentinel values (INVALID_TIME_POINT_INDEX is a large negative).
+      function realBarIdx(seq, indexes) {
+        if (typeof seq !== 'number' || !indexes) return null;
+        if (seq < 0 || seq >= indexes.length) return null;
+        var idx = indexes[seq];
+        return (typeof idx === 'number' && idx > -1e9) ? idx : null;
+      }
       var results = [];
       var filter = ${safeString(filter || '')};
+      var maxItems = ${cap};
       for (var si = 0; si < sources.length; si++) {
         var s = sources[si];
         if (!s.metaInfo) continue;
@@ -27,7 +80,20 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
           var g = s._graphics;
           if (!g || !g._primitivesCollection) continue;
           var pc = g._primitivesCollection;
+          var indexes = Array.isArray(g._indexes) ? g._indexes : null;
           var items = [];
+          var totalCount = 0;
+          function decorate(v, id) {
+            var bIdx = realBarIdx(v.x, indexes);
+            return {
+              id: id,
+              raw: v,
+              bar_time: barTimeAt(bIdx),
+              bar_time1: barTimeAt(realBarIdx(v.x1, indexes)),
+              bar_time2: barTimeAt(realBarIdx(v.x2, indexes)),
+              bar_ohlcv: barOhlcvAt(bIdx),
+            };
+          }
           try {
             var outer = pc.${collectionName};
             if (outer) {
@@ -35,7 +101,8 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
               if (inner) {
                 var coll = inner.get(false);
                 if (coll && coll._primitivesDataById && coll._primitivesDataById.size > 0) {
-                  coll._primitivesDataById.forEach(function(v, id) { items.push({id: id, raw: v}); });
+                  totalCount = coll._primitivesDataById.size;
+                  coll._primitivesDataById.forEach(function(v, id) { items.push(decorate(v, id)); });
                 }
               }
             }
@@ -46,12 +113,20 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
               if (tcOuter) {
                 var tcColl = tcOuter.get('tableCells');
                 if (tcColl && tcColl._primitivesDataById && tcColl._primitivesDataById.size > 0) {
-                  tcColl._primitivesDataById.forEach(function(v, id) { items.push({id: id, raw: v}); });
+                  totalCount = tcColl._primitivesDataById.size;
+                  tcColl._primitivesDataById.forEach(function(v, id) { items.push(decorate(v, id)); });
                 }
               }
             } catch(e) {}
           }
-          if (items.length > 0) results.push({name: name, count: items.length, items: items});
+          if (items.length > maxItems) items = items.slice(-maxItems);
+          // include_empty=true keeps the study in the result even when it
+          // drew nothing — lets callers distinguish "loaded but inactive"
+          // (e.g. session-triggered indicator before its trigger fires)
+          // from "not loaded at all".
+          if (totalCount > 0 || ${incEmpty}) {
+            results.push({name: name, count: totalCount, items: items, truncated: totalCount > items.length});
+          }
         } catch(e) {}
       }
       return results;
@@ -59,8 +134,21 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
   `;
 }
 
-export async function getOhlcv({ count, summary } = {}) {
-  const limit = Math.min(count || 100, MAX_OHLCV_BARS);
+function _toEpochSeconds(val) {
+  if (val == null) return null;
+  if (typeof val === 'number') {
+    // bar_time is epoch seconds; a caller passing a millisecond epoch (the JS
+    // Date.now() convention) would compare ms against seconds and filter out
+    // everything. Anything past ~year 5138 in seconds is really milliseconds.
+    return val > 1e11 ? Math.floor(val / 1000) : val;
+  }
+  const d = new Date(val);
+  const t = d.getTime();
+  if (isNaN(t)) return null;
+  return Math.floor(t / 1000);
+}
+
+async function _readOhlcvBars({ limit, evaluate }) {
   let data;
   try {
     data = await evaluate(`
@@ -78,11 +166,10 @@ export async function getOhlcv({ count, summary } = {}) {
       })()
     `);
   } catch { data = null; }
+  return data;
+}
 
-  if (!data || !data.bars || data.bars.length === 0) {
-    throw new Error('Could not extract OHLCV data. The chart may still be loading.');
-  }
-
+function _formatOhlcv({ data, summary }) {
   if (summary) {
     const bars = data.bars;
     const highs = bars.map(b => b.high);
@@ -97,16 +184,81 @@ export async function getOhlcv({ count, summary } = {}) {
       high: Math.max(...highs), low: Math.min(...lows),
       range: Math.round((Math.max(...highs) - Math.min(...lows)) * 100) / 100,
       change: Math.round((last.close - first.open) * 100) / 100,
-      change_pct: Math.round(((last.close - first.open) / first.open) * 10000) / 100 + '%',
+      change_pct: first.open ? Math.round(((last.close - first.open) / first.open) * 10000) / 100 + '%' : 'n/a',
       avg_volume: Math.round(volumes.reduce((a, b) => a + b, 0) / volumes.length),
       last_5_bars: bars.slice(-5),
     };
   }
-
   return { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
 }
 
-export async function getIndicator({ entity_id }) {
+export async function getOhlcv({ symbol, count, summary, _deps } = {}) {
+  const { evaluate, setSymbol, waitForChartReady } = _resolve(_deps);
+  const limit = Math.min(count || 100, MAX_OHLCV_BARS);
+
+  // No symbol or symbol matches active chart → read in place. Same shape as
+  // before — symbol parameter is a transparent passthrough in this case.
+  let activeSymbol = null;
+  if (symbol) {
+    try { activeSymbol = await evaluate(`${CHART_API}.symbol()`); } catch { /* ignore */ }
+  }
+  const symbolMatchesActive = !symbol || (activeSymbol && _bareSymbol(activeSymbol) === _bareSymbol(symbol));
+  if (symbolMatchesActive) {
+    const data = await _readOhlcvBars({ limit, evaluate });
+    if (!data || !data.bars || data.bars.length === 0) {
+      throw new Error('Could not extract OHLCV data. The chart may still be loading.');
+    }
+    return _formatOhlcv({ data, summary });
+  }
+
+  // Cross-symbol read: switch the chart, read bars for the new symbol,
+  // then restore the original symbol so the user's view isn't disturbed.
+  // Mirrors getQuote's chart_switch path. Without this, callers that pass
+  // `symbol` get back whatever was on the active chart, silently labelled
+  // as the requested symbol.
+  let restoreSymbol = activeSymbol;
+  if (!restoreSymbol) {
+    try {
+      const probe = await evaluate(`
+        (function() {
+          try { return { symbol: ${CHART_API}.symbol() }; }
+          catch (e) { return { error: e.message }; }
+        })()
+      `);
+      if (probe && probe.symbol) restoreSymbol = probe.symbol;
+    } catch { /* fall through with restoreSymbol still null */ }
+  }
+
+  // Refuse rather than strand: if we can't read the current symbol, switching
+  // would leave the user's chart on the requested symbol with no way back.
+  if (!restoreSymbol) {
+    throw new Error('Cannot safely read a non-active symbol: failed to read the current chart symbol to restore afterwards. Retry, or read the symbol on the active chart.');
+  }
+
+  await setSymbol({ symbol, _deps });
+  // Wait for the new symbol's bars to actually populate. `setSymbol`
+  // returns once chart.symbol() matches, but `bars.valueAt()` can still
+  // return the previous symbol's cached values for a few hundred ms.
+  try { await waitForChartReady(symbol); } catch { /* best-effort */ }
+
+  let data;
+  let restored = false;
+  try {
+    data = await _readOhlcvBars({ limit, evaluate });
+  } finally {
+    if (restoreSymbol) {
+      try { await setSymbol({ symbol: restoreSymbol, _deps }); restored = true; } catch { /* best-effort restore */ }
+    }
+  }
+
+  if (!data || !data.bars || data.bars.length === 0) {
+    throw new Error('Could not extract OHLCV data after symbol switch. The chart may still be loading.');
+  }
+  return { ..._formatOhlcv({ data, summary }), source: 'chart_switch', restored };
+}
+
+export async function getIndicator({ entity_id, _deps }) {
+  const { evaluate } = _resolve(_deps);
   const data = await evaluate(`
     (function() {
       var api = ${CHART_API};
@@ -132,20 +284,60 @@ export async function getIndicator({ entity_id }) {
   return { success: true, entity_id, visible: data?.visible, inputs };
 }
 
-export async function getStrategyResults() {
+// TV Desktop 3.1.0 exposes overlay strategies with metaInfo().is_price_study: true,
+// so the legacy filter (is_price_study === false) misses them. The authoritative
+// marker is metaInfo().id starting with 'StrategyScript'. Fall back to the legacy
+// filter for older TV builds.
+const FIND_STRATEGY_SRC = `
+  function __findStrategy(sources) {
+    for (var i = 0; i < sources.length; i++) {
+      var s = sources[i];
+      try {
+        var id = s.metaInfo && (s.metaInfo() || {}).id;
+        if (id && /^StrategyScript/.test(String(id))) return s;
+      } catch(e) {}
+    }
+    for (var j = 0; j < sources.length; j++) {
+      var t = sources[j];
+      try {
+        if (t.metaInfo && t.metaInfo().is_price_study === false &&
+            (t.ordersData || t.reportData || t._reportData)) return t;
+      } catch(e) {}
+    }
+    return null;
+  }
+`;
+
+export async function getStrategyResults({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const results = await evaluate(`
     (function() {
       try {
+        ${FIND_STRATEGY_SRC}
         var chart = ${CHART_API}._chartWidget;
         var sources = chart.model().model().dataSources();
-        var strat = null;
-        for (var i = 0; i < sources.length; i++) {
-          var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.reportData || s.performance)) { strat = s; break; }
-        }
+        var strat = __findStrategy(sources);
         if (!strat) return {metrics: {}, source: 'internal_api', error: 'No strategy found on chart. Add a strategy indicator first.'};
         var metrics = {};
-        if (strat.reportData) {
+        // TV 3.1.0+: _reportData.performance is where metrics actually live.
+        if (strat._reportData && strat._reportData.performance) {
+          var perf1 = strat._reportData.performance;
+          for (var k1 in perf1) {
+            var v1 = perf1[k1];
+            if (v1 === null || v1 === undefined) continue;
+            if (typeof v1 === 'object') {
+              for (var k2 in v1) {
+                var v2 = v1[k2];
+                if (v2 !== null && v2 !== undefined && typeof v2 !== 'object' && typeof v2 !== 'function') {
+                  metrics[k1 + '.' + k2] = v2;
+                }
+              }
+            } else if (typeof v1 !== 'function') {
+              metrics[k1] = v1;
+            }
+          }
+        }
+        if (Object.keys(metrics).length === 0 && strat.reportData) {
           var rd = typeof strat.reportData === 'function' ? strat.reportData() : strat.reportData;
           if (rd && typeof rd === 'object') {
             if (typeof rd.value === 'function') rd = rd.value();
@@ -164,29 +356,61 @@ export async function getStrategyResults() {
   return { success: true, metric_count: Object.keys(results?.metrics || {}).length, source: results?.source, metrics: results?.metrics || {}, error: results?.error };
 }
 
-export async function getTrades({ max_trades } = {}) {
+export async function getTrades({ max_trades, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const limit = Math.min(max_trades || 20, MAX_TRADES);
   const trades = await evaluate(`
     (function() {
       try {
+        ${FIND_STRATEGY_SRC}
         var chart = ${CHART_API}._chartWidget;
         var sources = chart.model().model().dataSources();
-        var strat = null;
-        for (var i = 0; i < sources.length; i++) {
-          var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.ordersData || s.reportData)) { strat = s; break; }
-        }
+        var strat = __findStrategy(sources);
         if (!strat) return {trades: [], source: 'internal_api', error: 'No strategy found on chart.'};
+
+        // TV 3.1.0+: _reportData.trades is the canonical closed-trade-pair list.
+        // Each entry: {e: entry, x: exit, q, tp, cp, rn, dd} with nested {v, p}.
+        if (strat._reportData && Array.isArray(strat._reportData.trades)) {
+          var rtrades = strat._reportData.trades;
+          var flat = [];
+          var cap = Math.min(rtrades.length, ${limit});
+          for (var t = 0; t < cap; t++) {
+            var tr = rtrades[t];
+            if (!tr) continue;
+            var e = tr.e || {}, x = tr.x || {};
+            flat.push({
+              entry_order_id: e.c || null,
+              entry_price: e.p,
+              entry_time_ms: e.tm,
+              entry_type: e.tp,
+              exit_order_id: x.c || null,
+              exit_price: x.p,
+              exit_time_ms: x.tm,
+              exit_type: x.tp,
+              quantity: tr.q,
+              pnl: tr.tp ? tr.tp.v : null,
+              pnl_pct: tr.tp ? tr.tp.p : null,
+              cum_pnl: tr.cp ? tr.cp.v : null,
+              cum_pnl_pct: tr.cp ? tr.cp.p : null,
+              runup: tr.rn ? tr.rn.v : null,
+              runup_pct: tr.rn ? tr.rn.p : null,
+              drawdown: tr.dd ? tr.dd.v : null,
+              drawdown_pct: tr.dd ? tr.dd.p : null
+            });
+          }
+          return {trades: flat, source: 'internal_api', total_trade_count: rtrades.length};
+        }
+
         var orders = null;
         if (strat.ordersData) { orders = typeof strat.ordersData === 'function' ? strat.ordersData() : strat.ordersData; if (orders && typeof orders.value === 'function') orders = orders.value(); }
         if (!orders || !Array.isArray(orders)) {
           if (strat._orders) orders = strat._orders;
           else if (strat.tradesData) { orders = typeof strat.tradesData === 'function' ? strat.tradesData() : strat.tradesData; if (orders && typeof orders.value === 'function') orders = orders.value(); }
         }
-        if (!orders || !Array.isArray(orders)) return {trades: [], source: 'internal_api', error: 'ordersData() returned non-array.'};
+        if (!orders || !Array.isArray(orders)) return {trades: [], source: 'internal_api', error: 'no trade data (_reportData.trades or ordersData).'};
         var result = [];
-        for (var t = 0; t < Math.min(orders.length, ${limit}); t++) {
-          var o = orders[t];
+        for (var t2 = 0; t2 < Math.min(orders.length, ${limit}); t2++) {
+          var o = orders[t2];
           if (typeof o === 'object' && o !== null) {
             var trade = {};
             var okeys = Object.keys(o);
@@ -198,22 +422,68 @@ export async function getTrades({ max_trades } = {}) {
       } catch(e) { return {trades: [], source: 'internal_api', error: e.message}; }
     })()
   `);
-  return { success: true, trade_count: trades?.trades?.length || 0, source: trades?.source, trades: trades?.trades || [], error: trades?.error };
+  return { success: true, trade_count: trades?.trades?.length || 0, total_trade_count: trades?.total_trade_count, source: trades?.source, trades: trades?.trades || [], error: trades?.error };
 }
 
-export async function getEquity() {
+export async function getStrategyInfo({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  const result = await evaluate(`
+    (function() {
+      var name = null, dateRange = null, source = null;
+      // Prefer internal API for the name — survives locale and DOM rewrites.
+      try {
+        ${FIND_STRATEGY_SRC}
+        var chart = ${CHART_API}._chartWidget;
+        var sources = chart.model().model().dataSources();
+        var strat = __findStrategy(sources);
+        if (strat && strat.metaInfo) {
+          var meta = strat.metaInfo() || {};
+          name = meta.description || meta.shortDescription || meta.title || null;
+          source = 'internal_api';
+        }
+      } catch (e) {}
+      // DOM scrape covers the date range (no clean API surface) and acts as
+      // a fallback when the strategy source isn't on the active chart.
+      try {
+        if (!name) {
+          var nameEl = document.querySelector('[class*="strategyGroup-"] [class*="ellipsisContainer-"]');
+          if (nameEl) { name = nameEl.textContent.trim(); source = 'dom'; }
+        }
+        var dateEl = document.querySelector('[class*="dateRangeMenuWrapper-"] [class*="ellipsisContainer-"]');
+        if (dateEl) dateRange = dateEl.textContent.trim();
+      } catch (e) {}
+      return { name: name, date_range: dateRange, source: source };
+    })()
+  `);
+  return {
+    success: !!(result && result.name),
+    name: result?.name || null,
+    date_range: result?.date_range || null,
+    source: result?.source || null,
+  };
+}
+
+export async function getEquity({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const equity = await evaluate(`
     (function() {
       try {
+        ${FIND_STRATEGY_SRC}
         var chart = ${CHART_API}._chartWidget;
         var sources = chart.model().model().dataSources();
-        var strat = null;
-        for (var i = 0; i < sources.length; i++) {
-          var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.reportData || s.performance)) { strat = s; break; }
-        }
+        var strat = __findStrategy(sources);
         if (!strat) return {data: [], source: 'internal_api', error: 'No strategy found on chart.'};
         var data = [];
+        // TV 3.1.0+: _reportData.buyHold holds per-bar equity points
+        if (strat._reportData && Array.isArray(strat._reportData.buyHold)) {
+          var bh = strat._reportData.buyHold;
+          for (var bi = 0; bi < bh.length; bi++) {
+            var bv = bh[bi];
+            if (typeof bv === 'number') data.push({index: bi, value: bv});
+            else if (bv && typeof bv === 'object') data.push(Object.assign({index: bi}, bv));
+          }
+          if (data.length) return {data: data, source: 'internal_api'};
+        }
         if (strat.equityData) {
           var eq = typeof strat.equityData === 'function' ? strat.equityData() : strat.equityData;
           if (eq && typeof eq.value === 'function') eq = eq.value();
@@ -242,12 +512,66 @@ export async function getEquity() {
   return { success: true, data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [], equity_summary: equity?.equity_summary, note: equity?.note, error: equity?.error };
 }
 
-export async function getQuote({ symbol } = {}) {
+// Fetch a quote via TradingView's public scanner REST endpoint. Faster than
+// chart-switch and doesn't disturb the chart, but only covers symbols that
+// america/scan indexes (US equities). For crypto/forex/non-US the caller
+// should fall back to chart-switch via the dispatching getQuote().
+//
+// CORS gotcha (same one that bites alert_create_indicator): no Content-Type
+// header — a custom Content-Type triggers a preflight OPTIONS that the
+// scanner endpoint rejects. Embed the body via JSON.stringify so it lands
+// as a JS string literal in the page.
+async function _getQuoteViaScanner({ symbol, _deps }) {
+  const { evaluateAsync } = _resolve(_deps);
+  const ticker = String(symbol).trim();
+  const body = JSON.stringify({
+    symbols: { tickers: [ticker] },
+    columns: ['close', 'open', 'high', 'low', 'volume', 'description', 'exchange', 'type'],
+  });
+  const resp = await evaluateAsync(`
+    fetch('https://scanner.tradingview.com/america/scan', {
+      method: 'POST',
+      credentials: 'include',
+      body: ${JSON.stringify(body)}
+    })
+      .then(function(r) { return r.text().then(function(t) {
+        var parsed = null;
+        try { parsed = t ? JSON.parse(t) : null; } catch(e) {}
+        return { status: r.status, ok: r.ok, body: t, json: parsed };
+      }); })
+      .catch(function(e) { return { error: e.message }; })
+  `);
+  if (!resp || resp.error) {
+    throw new Error(`scanner fetch failed: ${resp?.error || 'no response'}`);
+  }
+  if (!resp.ok) {
+    throw new Error(`scanner HTTP ${resp.status}: ${String(resp.body || '').slice(0, 200)}`);
+  }
+  const rows = resp.json?.data;
+  if (!Array.isArray(rows) || rows.length === 0 || !Array.isArray(rows[0]?.d)) {
+    throw new Error(`scanner returned no data for "${ticker}" (use a fully-qualified symbol like "NASDAQ:TSCO", or pass route:'chart_switch' for non-US assets)`);
+  }
+  const [close, open, high, low, volume, description, exchange, type] = rows[0].d;
+  return {
+    success: true,
+    symbol: rows[0].s || ticker,
+    open, high, low, close,
+    last: close,
+    volume: volume || 0,
+    description: description || '',
+    exchange: exchange || '',
+    type: type || '',
+    source: 'scanner_rest',
+  };
+}
+
+async function _getQuoteFromActiveChart({ _deps }) {
+  const { evaluate } = _resolve(_deps);
   const data = await evaluate(`
     (function() {
       var api = ${CHART_API};
-      var sym = ${safeString(symbol || '')};
-      if (!sym) { try { sym = api.symbol(); } catch(e) {} }
+      var sym = '';
+      try { sym = api.symbol(); } catch(e) {}
       if (!sym) { try { sym = api.symbolExt().symbol; } catch(e) {} }
       var ext = {};
       try { ext = api.symbolExt() || {}; } catch(e) {}
@@ -277,7 +601,73 @@ export async function getQuote({ symbol } = {}) {
   return { success: true, ...data };
 }
 
-export async function getDepth() {
+export async function getQuote({ symbol, route, _deps } = {}) {
+  const { evaluate, setSymbol } = _resolve(_deps);
+  const mode = route || 'auto';
+
+  // No symbol or symbol matches active chart → read in place. This path also
+  // gives bid/ask DOM scrape, which neither scanner nor chart-switch covers.
+  let activeSymbol = null;
+  if (symbol) {
+    try { activeSymbol = await evaluate(`${CHART_API}.symbol()`); } catch { /* ignore */ }
+  }
+  const symbolMatchesActive = !symbol || (activeSymbol && _bareSymbol(activeSymbol) === _bareSymbol(symbol));
+  if (symbolMatchesActive) {
+    const r = await _getQuoteFromActiveChart({ _deps });
+    return { ...r, source: 'active_chart' };
+  }
+
+  // Cross-symbol read. Scanner REST is fast and doesn't disturb the chart but
+  // is region-limited (america/scan covers US equities). Chart-switch is
+  // universal but visibly toggles the chart and waits for studies to settle.
+  if (mode === 'rest') {
+    return await _getQuoteViaScanner({ symbol, _deps });
+  }
+  if (mode === 'auto') {
+    try {
+      return await _getQuoteViaScanner({ symbol, _deps });
+    } catch {
+      // Fall through to chart_switch path below.
+    }
+  }
+
+  // chart_switch (explicit) or auto-fallback: setSymbol → read → restore.
+  // Re-probe the active symbol with a sturdier read right before we
+  // switch — the initial probe at line 544 may have failed (CDP
+  // transient, empty symbol()) and we'd otherwise strand the user on
+  // the requested symbol with no restore. If we still can't read it,
+  // surface `restored: false` instead of pretending nothing happened.
+  let restoreSymbol = activeSymbol;
+  if (!restoreSymbol) {
+    try {
+      const probe = await evaluate(`
+        (function() {
+          try { return { symbol: ${CHART_API}.symbol() }; }
+          catch (e) { return { error: e.message }; }
+        })()
+      `);
+      if (probe && probe.symbol) restoreSymbol = probe.symbol;
+    } catch { /* fall through with restoreSymbol still null */ }
+  }
+  // Refuse rather than strand the user's chart on the requested symbol.
+  if (!restoreSymbol) {
+    throw new Error('Cannot safely quote a non-active symbol: failed to read the current chart symbol to restore afterwards. Retry, or use route:"rest" for a non-switching quote.');
+  }
+  await setSymbol({ symbol, _deps });
+  let quoteResult;
+  let restored = false;
+  try {
+    quoteResult = await _getQuoteFromActiveChart({ _deps });
+  } finally {
+    if (restoreSymbol) {
+      try { await setSymbol({ symbol: restoreSymbol, _deps }); restored = true; } catch { /* best-effort restore */ }
+    }
+  }
+  return { ...quoteResult, source: 'chart_switch', restored };
+}
+
+export async function getDepth({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const data = await evaluate(`
     (function() {
       var domPanel = document.querySelector('[class*="depth"]')
@@ -321,13 +711,16 @@ export async function getDepth() {
   return { success: true, bid_levels: data.bids?.length || 0, ask_levels: data.asks?.length || 0, spread: data.spread, bids: data.bids || [], asks: data.asks || [], raw_values: data.raw_values, note: data.note };
 }
 
-export async function getStudyValues() {
+export async function getStudyValues({ study_filter, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  const filter = study_filter || '';
   const data = await evaluate(`
     (function() {
       var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
       var model = chart.model();
       var sources = model.model().dataSources();
       var results = [];
+      var filter = ${safeString(filter)};
       for (var si = 0; si < sources.length; si++) {
         var s = sources[si];
         if (!s.metaInfo) continue;
@@ -335,6 +728,7 @@ export async function getStudyValues() {
           var meta = s.metaInfo();
           var name = meta.description || meta.shortDescription || '';
           if (!name) continue;
+          if (filter && name.indexOf(filter) === -1) continue;
           var values = {};
           try {
             var dwv = s.dataWindowView();
@@ -357,9 +751,10 @@ export async function getStudyValues() {
   return { success: true, study_count: data?.length || 0, studies: data || [] };
 }
 
-export async function getPineLines({ study_filter, verbose } = {}) {
+export async function getPineLines({ study_filter, verbose, include_empty, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwglines', 'lines', filter));
+  const raw = await evaluate(buildGraphicsJS('dwglines', 'lines', filter, undefined, include_empty));
   if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
 
   const studies = raw.map(s => {
@@ -381,29 +776,21 @@ export async function getPineLines({ study_filter, verbose } = {}) {
   return { success: true, study_count: studies.length, studies };
 }
 
-export async function getPineLabels({ study_filter, max_labels, verbose } = {}) {
+export async function getPineLabels({ study_filter, max_labels, verbose, since, until, include_empty, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwglabels', 'labels', filter));
+  const limit = max_labels || 50;
+  const raw = await evaluate(buildGraphicsJS('dwglabels', 'labels', filter, limit, include_empty));
   if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
 
-  const limit = max_labels || 50;
-  const studies = raw.map(s => {
-    let labels = s.items.map(item => {
-      const v = item.raw;
-      const text = v.t || '';
-      const price = v.y != null ? Math.round(v.y * 100) / 100 : null;
-      if (verbose) return { id: item.id, text, price, x: v.x, yloc: v.yl, size: v.sz, textColor: v.tci, color: v.ci };
-      return { text, price };
-    }).filter(l => l.text || l.price != null);
-    if (labels.length > limit) labels = labels.slice(-limit);
-    return { name: s.name, total_labels: s.count, showing: labels.length, labels };
-  });
+  const studies = formatPineLabels(raw, limit, verbose, since, until);
   return { success: true, study_count: studies.length, studies };
 }
 
-export async function getPineTables({ study_filter } = {}) {
+export async function getPineTables({ study_filter, include_empty, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwgtablecells', 'tableCells', filter));
+  const raw = await evaluate(buildGraphicsJS('dwgtablecells', 'tableCells', filter, undefined, include_empty));
   if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
 
   const studies = raw.map(s => {
@@ -415,7 +802,7 @@ export async function getPineTables({ study_filter } = {}) {
       if (!tables[tid][v.row]) tables[tid][v.row] = {};
       tables[tid][v.row][v.col] = v.t || '';
     }
-    const tableList = Object.entries(tables).map(([tid, rows]) => {
+    const tableList = Object.entries(tables).map(([_tid, rows]) => {
       const rowNums = Object.keys(rows).map(Number).sort((a, b) => a - b);
       const formatted = rowNums.map(rn => {
         const cols = rows[rn];
@@ -429,9 +816,132 @@ export async function getPineTables({ study_filter } = {}) {
   return { success: true, study_count: studies.length, studies };
 }
 
-export async function getPineBoxes({ study_filter, verbose } = {}) {
+/**
+ * Read plotshape/plotchar markers from Pine Script indicators.
+ * These are stored in the study's bar data series (not _primitivesCollection),
+ * so buildGraphicsJS can't reach them. We scan each study's metaInfo for
+ * "shapes" type plots, then read the bar data to find which bars have active markers.
+ */
+export async function getPineShapes({ study_filter, last_n_bars, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwgboxes', 'boxes', filter));
+  const maxBars = Math.min(last_n_bars || 100, 500);
+  const raw = await evaluate(`
+    (function() {
+      var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+      var model = chart.model();
+      var sources = model.model().dataSources();
+      var mainSeries = model.mainSeries();
+      var mainBars = mainSeries.bars();
+      var filter = ${safeString(filter)};
+      var maxBars = ${maxBars};
+      var results = [];
+
+      for (var si = 0; si < sources.length; si++) {
+        var s = sources[si];
+        if (!s.metaInfo) continue;
+        try {
+          var meta = s.metaInfo();
+          var name = meta.description || meta.shortDescription || '';
+          if (!name) continue;
+          if (filter && name.indexOf(filter) === -1) continue;
+          if (!meta.plots) continue;
+
+          var shapePlots = [];
+          for (var pi = 0; pi < meta.plots.length; pi++) {
+            var plot = meta.plots[pi];
+            if (plot.type !== 'shapes') continue;
+            var style = meta.styles && meta.styles[plot.id] ? meta.styles[plot.id] : {};
+            var defaults = meta.defaults && meta.defaults.styles && meta.defaults.styles[plot.id]
+              ? meta.defaults.styles[plot.id] : {};
+            shapePlots.push({
+              plotIndex: pi,
+              dataIndex: pi + 1,
+              id: plot.id,
+              title: style.title || plot.id,
+              shape: defaults.plottype || 'unknown',
+              location: defaults.location || 'AboveBar',
+              color: defaults.color || null,
+              size: style.size || 'auto'
+            });
+          }
+          if (shapePlots.length === 0) continue;
+
+          var data = s._data;
+          if (!data) continue;
+          var lastIdx = data.lastIndex();
+          var firstIdx = Math.max(data.firstIndex(), lastIdx - maxBars + 1);
+
+          var signals = [];
+          for (var b = lastIdx; b >= firstIdx; b--) {
+            var row = data.valueAt(b);
+            if (!row) continue;
+            for (var sp = 0; sp < shapePlots.length; sp++) {
+              var di = shapePlots[sp].dataIndex;
+              var val = row[di];
+              // Treat 0/false as "no signal": boolean/numeric plotshape and
+              // plotchar series represent inactive bars as false or 0, so
+              // including them would flood results with false positives. (A
+              // shape plotted at a literal price of 0 is a rare edge case not
+              // worth that cost.)
+              if (val && val !== 0 && !isNaN(val)) {
+                var mainRow = mainBars.valueAt(b);
+                var ohlc = null;
+                if (mainRow) {
+                  ohlc = {
+                    time: new Date(mainRow[0] * 1000).toISOString(),
+                    timestamp: mainRow[0],
+                    open: mainRow[1],
+                    high: mainRow[2],
+                    low: mainRow[3],
+                    close: mainRow[4]
+                  };
+                }
+                signals.push({
+                  plot: shapePlots[sp].title,
+                  shape: shapePlots[sp].shape,
+                  location: shapePlots[sp].location,
+                  color: shapePlots[sp].color,
+                  barIndex: b,
+                  value: val,
+                  ohlc: ohlc
+                });
+              }
+            }
+          }
+
+          if (shapePlots.length > 0) {
+            results.push({
+              name: name,
+              shapePlots: shapePlots,
+              signals: signals,
+              signalCount: signals.length,
+              barsScanned: lastIdx - firstIdx + 1
+            });
+          }
+        } catch(e) {}
+      }
+      return results;
+    })()
+  `);
+
+  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+
+  const studies = raw.map(s => ({
+    name: s.name,
+    shape_plots: s.shapePlots,
+    signal_count: s.signalCount,
+    bars_scanned: s.barsScanned,
+    signals: s.signals,
+  }));
+
+  return { success: true, study_count: studies.length, studies };
+}
+
+export async function getPineBoxes({ study_filter, verbose, include_empty, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  const filter = study_filter || '';
+  const raw = await evaluate(buildGraphicsJS('dwgboxes', 'boxes', filter, undefined, include_empty));
   if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
 
   const studies = raw.map(s => {
@@ -451,4 +961,484 @@ export async function getPineBoxes({ study_filter, verbose } = {}) {
     return result;
   });
   return { success: true, study_count: studies.length, studies };
+}
+
+// ── batchReadPanes (B.18 — port of ttnsx888 668cc55d) ──────────────
+//
+// Read multiple pane data types in ONE CDP call across multiple panes.
+// Replaces the pane_focus → data_* loop for multi-symbol grid workflows.
+// Iterates pane indices via _chartWidgetCollection.getAll(), bypassing the
+// _activeChartWidgetWV singleton — non-active panes still have populated
+// pine graphics, study values, and line-tool drawings.
+
+function formatPineLines(raw, verbose) {
+  return (raw || []).map(s => {
+    const hLevels = [];
+    const seen = {};
+    const allLines = [];
+    for (const item of s.items) {
+      const v = item.raw;
+      const y1 = v.y1 != null ? Math.round(v.y1 * 100) / 100 : null;
+      const y2 = v.y2 != null ? Math.round(v.y2 * 100) / 100 : null;
+      if (verbose) allLines.push({ id: item.id, y1, y2, x1: v.x1, x2: v.x2, horizontal: v.y1 === v.y2, style: v.st, width: v.w, color: v.ci });
+      if (y1 != null && v.y1 === v.y2 && !seen[y1]) { hLevels.push(y1); seen[y1] = true; }
+    }
+    hLevels.sort((a, b) => b - a);
+    const result = { name: s.name, total_lines: s.count, horizontal_levels: hLevels };
+    if (verbose) result.all_lines = allLines;
+    return result;
+  });
+}
+
+function formatPineLabels(raw, max_labels, verbose, since, until) {
+  const limit = max_labels || 50;
+  const sinceSec = _toEpochSeconds(since);
+  const untilSec = _toEpochSeconds(until);
+  const round4 = (n) => (typeof n === 'number' && isFinite(n) ? Math.round(n * 10000) / 10000 : null);
+  return (raw || []).map(s => {
+    let labels = s.items.map(item => {
+      const v = item.raw;
+      const text = v.t || '';
+      const price = v.y != null ? Math.round(v.y * 100) / 100 : null;
+      const bar_time = item.bar_time != null ? item.bar_time : null;
+      const ohlcv = item.bar_ohlcv || null;
+      // signal_price = the bar's close at the time the label was drawn — i.e.
+      // the actual market price when the signal fired. Independent of where
+      // the indicator chose to *draw* the label (often offset above/below
+      // the candle for legibility), so agents can correlate labels to the
+      // real bar event without misreading the visual offset as the price.
+      const signal_price = ohlcv ? round4(ohlcv.close) : null;
+      const bar = ohlcv ? {
+        open: round4(ohlcv.open),
+        high: round4(ohlcv.high),
+        low: round4(ohlcv.low),
+        close: round4(ohlcv.close),
+        volume: ohlcv.volume,
+      } : null;
+      if (verbose) return { id: item.id, text, price, signal_price, bar, bar_time, bar_index: v.x, yloc: v.yl, size: v.sz, textColor: v.tci, color: v.ci };
+      return { text, price, signal_price, bar, bar_time };
+    }).filter(l => l.text || l.price != null);
+    if (sinceSec != null) labels = labels.filter(l => l.bar_time != null && l.bar_time >= sinceSec);
+    if (untilSec != null) labels = labels.filter(l => l.bar_time != null && l.bar_time <= untilSec);
+    if (labels.length > limit) labels = labels.slice(-limit);
+    return { name: s.name, total_labels: s.count, showing: labels.length, labels };
+  });
+}
+
+function formatPineTables(raw) {
+  return (raw || []).map(s => {
+    const tables = {};
+    for (const item of s.items) {
+      const v = item.raw;
+      const tid = v.tid || 0;
+      if (!tables[tid]) tables[tid] = {};
+      if (!tables[tid][v.row]) tables[tid][v.row] = {};
+      tables[tid][v.row][v.col] = v.t || '';
+    }
+    const tableList = Object.entries(tables).map(([_tid, rows]) => {
+      const rowNums = Object.keys(rows).map(Number).sort((a, b) => a - b);
+      const formatted = rowNums.map(rn => {
+        const cols = rows[rn];
+        const colNums = Object.keys(cols).map(Number).sort((a, b) => a - b);
+        return colNums.map(cn => cols[cn]).filter(Boolean).join(' | ');
+      }).filter(Boolean);
+      return { rows: formatted };
+    });
+    return { name: s.name, tables: tableList };
+  });
+}
+
+function formatPineBoxes(raw, verbose) {
+  return (raw || []).map(s => {
+    const zones = [];
+    const seen = {};
+    const allBoxes = [];
+    for (const item of s.items) {
+      const v = item.raw;
+      const high = v.y1 != null && v.y2 != null ? Math.round(Math.max(v.y1, v.y2) * 100) / 100 : null;
+      const low = v.y1 != null && v.y2 != null ? Math.round(Math.min(v.y1, v.y2) * 100) / 100 : null;
+      if (verbose) allBoxes.push({ id: item.id, high, low, x1: v.x1, x2: v.x2, borderColor: v.c, bgColor: v.bc });
+      if (high != null && low != null) { const key = high + ':' + low; if (!seen[key]) { zones.push({ high, low }); seen[key] = true; } }
+    }
+    zones.sort((a, b) => b.high - a.high);
+    const result = { name: s.name, total_boxes: s.count, zones };
+    if (verbose) result.all_boxes = allBoxes;
+    return result;
+  });
+}
+
+export async function batchReadPanes({ indices, reads, wait_ms, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  if (!reads || typeof reads !== 'object') throw new Error('batchReadPanes: `reads` is required');
+
+  const idxArg = Array.isArray(indices) && indices.length > 0
+    ? JSON.stringify(indices.map(Number))
+    : 'null';
+  const waitMs = Number(wait_ms) > 0 ? Math.min(Number(wait_ms), 5000) : 0;
+  if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
+
+  const wantTables      = !!reads.pine_tables;
+  const wantLines       = !!reads.pine_lines;
+  const wantLabels      = !!reads.pine_labels;
+  const wantBoxes       = !!reads.pine_boxes;
+  const wantStudyValues = !!reads.study_values;
+  const wantOhlcv       = !!reads.ohlcv_summary;
+  const wantDrawings    = !!reads.drawings;
+
+  const tablesFilter = reads.pine_tables?.study_filter || '';
+  const linesFilter  = reads.pine_lines?.study_filter  || '';
+  const labelsFilter = reads.pine_labels?.study_filter || '';
+  const boxesFilter  = reads.pine_boxes?.study_filter  || '';
+  const ohlcvBars    = Math.min(Math.max(Number(reads.ohlcv_summary?.bars) || 20, 2), 500);
+
+  const expression = `
+    (function() {
+      var cwc = window.TradingViewApi._chartWidgetCollection;
+      var all = cwc.getAll();
+      var layoutType = cwc._layoutType;
+      if (typeof layoutType === 'object' && layoutType && typeof layoutType.value === 'function') layoutType = layoutType.value();
+      var inlineCount = cwc.inlineChartsCount;
+      if (typeof inlineCount === 'object' && inlineCount && typeof inlineCount.value === 'function') inlineCount = inlineCount.value();
+      var paneCount = Math.min(all.length, inlineCount || all.length);
+
+      var requestedIndices = ${idxArg};
+      var idxList = [];
+      if (requestedIndices) {
+        for (var i = 0; i < requestedIndices.length; i++) {
+          var ri = requestedIndices[i];
+          if (ri >= 0 && ri < paneCount) idxList.push(ri);
+        }
+      } else {
+        for (var j = 0; j < paneCount; j++) idxList.push(j);
+      }
+
+      function readGraphics(chart, collectionName, mapKey, filter) {
+        try {
+          var sources = chart.model().model().dataSources();
+          var results = [];
+          for (var si = 0; si < sources.length; si++) {
+            var s = sources[si];
+            if (!s.metaInfo) continue;
+            try {
+              var meta = s.metaInfo();
+              var name = meta.description || meta.shortDescription || '';
+              if (!name) continue;
+              if (filter && name.indexOf(filter) === -1) continue;
+              var g = s._graphics;
+              if (!g || !g._primitivesCollection) continue;
+              var outer = g._primitivesCollection[collectionName];
+              if (!outer || typeof outer.get !== 'function') continue;
+              var inner = outer.get(mapKey);
+              if (!inner || typeof inner.get !== 'function') continue;
+              var coll = inner.get(false);
+              if (!coll || !coll._primitivesDataById) continue;
+              var map = coll._primitivesDataById;
+              if (typeof map.forEach !== 'function') continue;
+              var items = [];
+              map.forEach(function(v, id) { items.push({id: id, raw: v}); });
+              if (items.length > 0) results.push({name: name, count: items.length, items: items});
+            } catch(e) {}
+          }
+          return results;
+        } catch(e) { return []; }
+      }
+
+      function readStudyValues(chart) {
+        try {
+          var sources = chart.model().model().dataSources();
+          var results = [];
+          for (var si = 0; si < sources.length; si++) {
+            var s = sources[si];
+            if (!s.metaInfo) continue;
+            try {
+              var meta = s.metaInfo();
+              var name = meta.description || meta.shortDescription || '';
+              if (!name) continue;
+              var values = {};
+              try {
+                var dwv = s.dataWindowView();
+                if (dwv) {
+                  var items = dwv.items();
+                  if (items) {
+                    for (var i = 0; i < items.length; i++) {
+                      var it = items[i];
+                      if (it._value && it._value !== '∅' && it._title) values[it._title] = it._value;
+                    }
+                  }
+                }
+              } catch(e) {}
+              if (Object.keys(values).length > 0) results.push({ name: name, values: values });
+            } catch(e) {}
+          }
+          return results;
+        } catch(e) { return []; }
+      }
+
+      function readOhlcv(chart, barCount) {
+        try {
+          var bars = chart.model().mainSeries().bars();
+          if (!bars || typeof bars.lastIndex !== 'function') return null;
+          var end = bars.lastIndex();
+          var start = Math.max(bars.firstIndex(), end - barCount + 1);
+          var out = [];
+          for (var i = start; i <= end; i++) {
+            var v = bars.valueAt(i);
+            if (v) out.push({time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0});
+          }
+          if (out.length === 0) return null;
+          var first = out[0];
+          var last = out[out.length - 1];
+          var high = -Infinity, low = Infinity, volSum = 0;
+          for (var k = 0; k < out.length; k++) {
+            if (out[k].high > high) high = out[k].high;
+            if (out[k].low < low) low = out[k].low;
+            volSum += out[k].volume;
+          }
+          return {
+            bar_count: out.length,
+            period: { from: first.time, to: last.time },
+            open: first.open, close: last.close, high: high, low: low,
+            range: Math.round((high - low) * 100) / 100,
+            change: Math.round((last.close - first.open) * 100) / 100,
+            change_pct: first.open ? Math.round(((last.close - first.open) / first.open) * 10000) / 100 + '%' : 'n/a',
+            avg_volume: Math.round(volSum / out.length),
+            last_5_bars: out.slice(-5),
+            total_bars: bars.size()
+          };
+        } catch(e) { return { error: e.message }; }
+      }
+
+      function safeCall(obj, method) {
+        try { if (typeof obj[method] === 'function') return obj[method](); } catch(e) {}
+        return undefined;
+      }
+
+      function readDrawings(chart) {
+        try {
+          var sources = chart.model().model().dataSources();
+          var out = [];
+          for (var si = 0; si < sources.length; si++) {
+            var s = sources[si];
+            if (typeof s.points !== 'function' || typeof s.properties !== 'function') continue;
+            try {
+              var id = safeCall(s, 'id');
+              if (typeof id !== 'string' && typeof id !== 'number') continue;
+              var entry = { entity_id: id };
+              var nm = safeCall(s, 'name');
+              if (typeof nm === 'string') entry.name = nm;
+              else if (typeof s.toolname === 'string') entry.name = s.toolname;
+              var canon = null;
+              var rawT = safeCall(s, 'toolname');
+              if (typeof rawT === 'string' && rawT.length > 0) canon = rawT;
+              if (!canon && typeof s.toolname === 'string') canon = s.toolname;
+              if (!canon && entry.name) {
+                var n = String(entry.name).trim().toLowerCase();
+                var nameMap = {
+                  'trend line': 'trend_line', 'trendline': 'trend_line',
+                  'horizontal line': 'horizontal_line', 'horizontal ray': 'horizontal_ray',
+                  'vertical line': 'vertical_line',
+                  'fib retracement': 'fib_retracement', 'fibonacci retracement': 'fib_retracement',
+                  'fib extension': 'fib_extension', 'fibonacci extension': 'fib_extension',
+                  'rectangle': 'rectangle', 'ellipse': 'ellipse',
+                  'text': 'text', 'note': 'note', 'callout': 'callout',
+                  'arrow': 'arrow', 'price label': 'price_label', 'price range': 'price_range',
+                };
+                canon = nameMap[n] || n.replace(/\\s+/g, '_');
+              }
+              if (canon) entry.type = canon;
+              var pts = safeCall(s, 'points');
+              if (pts) entry.points = pts;
+              try {
+                var pRaw = s.properties();
+                if (pRaw) {
+                  var flat = (typeof pRaw.state === 'function') ? pRaw.state() : pRaw;
+                  entry.properties = flat;
+                }
+              } catch(e) { entry.properties_error = e.message; }
+              var vis = safeCall(s, 'isVisible');
+              if (vis !== undefined) entry.visible = vis;
+              var lock = safeCall(s, 'isLocked');
+              if (lock !== undefined) entry.locked = lock;
+              var sel = safeCall(s, 'isSelectionEnabled');
+              if (sel !== undefined) entry.selectable = sel;
+              out.push(entry);
+            } catch(e) {}
+          }
+          return out;
+        } catch(e) { return []; }
+      }
+
+      var panes = [];
+      for (var p = 0; p < idxList.length; p++) {
+        var idx = idxList[p];
+        var chart = all[idx];
+        var paneOut = { index: idx };
+        try {
+          var ms = chart.model().mainSeries();
+          paneOut.symbol = ms.symbol();
+          paneOut.resolution = ms.interval();
+          ${wantTables      ? 'paneOut.pine_tables  = readGraphics(chart, "dwgtablecells", "tableCells", ' + JSON.stringify(tablesFilter) + ');' : ''}
+          ${wantLines       ? 'paneOut.pine_lines   = readGraphics(chart, "dwglines",      "lines",      ' + JSON.stringify(linesFilter)  + ');' : ''}
+          ${wantLabels      ? 'paneOut.pine_labels  = readGraphics(chart, "dwglabels",     "labels",     ' + JSON.stringify(labelsFilter) + ');' : ''}
+          ${wantBoxes       ? 'paneOut.pine_boxes   = readGraphics(chart, "dwgboxes",      "boxes",      ' + JSON.stringify(boxesFilter)  + ');' : ''}
+          ${wantStudyValues ? 'paneOut.study_values = readStudyValues(chart);' : ''}
+          ${wantOhlcv       ? 'paneOut.ohlcv_summary = readOhlcv(chart, ' + ohlcvBars + ');' : ''}
+          ${wantDrawings    ? 'paneOut.drawings = readDrawings(chart);' : ''}
+        } catch(e) { paneOut.error = e.message; }
+        panes.push(paneOut);
+      }
+
+      return { layout: layoutType, pane_count: paneCount, panes: panes };
+    })()
+  `;
+
+  const rawResult = await evaluate(expression);
+  if (!rawResult) throw new Error('batchReadPanes: empty response from CDP');
+
+  const labelsMax = reads.pine_labels?.max_labels;
+  const linesVerbose  = !!reads.pine_lines?.verbose;
+  const labelsVerbose = !!reads.pine_labels?.verbose;
+  const boxesVerbose  = !!reads.pine_boxes?.verbose;
+
+  const panes = rawResult.panes.map(p => {
+    const out = { index: p.index, symbol: p.symbol, resolution: p.resolution };
+    if (p.error) out.error = p.error;
+    if (p.pine_tables)  out.pine_tables  = formatPineTables(p.pine_tables);
+    if (p.pine_lines)   out.pine_lines   = formatPineLines(p.pine_lines, linesVerbose);
+    if (p.pine_labels)  out.pine_labels  = formatPineLabels(p.pine_labels, labelsMax, labelsVerbose);
+    if (p.pine_boxes)   out.pine_boxes   = formatPineBoxes(p.pine_boxes, boxesVerbose);
+    if (p.study_values) out.study_values = p.study_values;
+    if (p.ohlcv_summary) out.ohlcv_summary = p.ohlcv_summary;
+    if (p.drawings)     out.drawings     = p.drawings;
+    return out;
+  });
+
+  return {
+    success: true,
+    layout: rawResult.layout,
+    pane_count: rawResult.pane_count,
+    requested: panes.length,
+    panes,
+  };
+}
+
+const MAX_TIMEFRAMES_PER_CALL = 10;
+
+/**
+ * Read indicator values + price summary across multiple timeframes in one call.
+ * Saves the original timeframe, loops through the requested set reusing the
+ * standard setTimeframe / waitForStudiesReady / getStudyValues / getOhlcv
+ * primitives, and restores the original timeframe in finally{}.
+ */
+export async function getMultiTimeframe({ timeframes, study_filter, include_ohlcv, _deps } = {}) {
+  const tfs = Array.isArray(timeframes)
+    ? timeframes.map(t => String(t).trim()).filter(Boolean)
+    : String(timeframes || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (tfs.length === 0) {
+    throw new Error('timeframes is required (array or comma-separated string, e.g. ["W","D","60","15"])');
+  }
+  if (tfs.length > MAX_TIMEFRAMES_PER_CALL) {
+    throw new Error(`Maximum ${MAX_TIMEFRAMES_PER_CALL} timeframes per call to keep output bounded`);
+  }
+
+  const { evaluate } = _resolve(_deps);
+  const includeOhlcv = include_ohlcv !== false;
+
+  let originalTf = null;
+  try { originalTf = await evaluate(`${CHART_API}.resolution()`); } catch {}
+
+  const results = {};
+  const errors = {};
+
+  try {
+    for (const tf of tfs) {
+      try {
+        await _setTimeframe({ timeframe: tf, _deps });
+        const studyValues = await getStudyValues({ study_filter, _deps });
+        const entry = {
+          timeframe: tf,
+          study_count: studyValues.study_count,
+          studies: studyValues.studies,
+        };
+        if (includeOhlcv) {
+          try {
+            const ohlcv = await getOhlcv({ summary: true, _deps });
+            entry.price = {
+              open: ohlcv.open,
+              close: ohlcv.close,
+              high: ohlcv.high,
+              low: ohlcv.low,
+              range: ohlcv.range,
+              change: ohlcv.change,
+              change_pct: ohlcv.change_pct,
+              avg_volume: ohlcv.avg_volume,
+              bar_count: ohlcv.bar_count,
+            };
+          } catch (err) {
+            entry.price_error = err.message;
+          }
+        }
+        results[tf] = entry;
+      } catch (err) {
+        errors[tf] = err.message;
+      }
+    }
+  } finally {
+    // Always restore the original timeframe. The previous guard skipped
+    // restore when the last requested tf equalled originalTf as a string, but
+    // TV's resolution() is canonical ("1D" vs a "D" request) so the compare
+    // was unreliable — and if a mid-loop setTimeframe threw, the chart was
+    // left on the wrong tf. Re-setting the same tf is cheap and idempotent.
+    if (originalTf) {
+      try { await _setTimeframe({ timeframe: originalTf, _deps }); } catch {}
+    }
+  }
+
+  return {
+    success: true,
+    original_timeframe: originalTf,
+    timeframes: tfs,
+    include_ohlcv: includeOhlcv,
+    results,
+    ...(Object.keys(errors).length ? { errors } : {}),
+  };
+}
+
+const MAX_PATTERN_BARS = 500;
+
+/**
+ * Native candlestick pattern detection over the chart's OHLC bars.
+ * No CDP-side pattern logic, no chart pollution: pulls bars via getOhlcv
+ * and runs deterministic pure detectors from patterns.js.
+ */
+export async function detectCandlestickPatterns({
+  last_n_bars,
+  min_strength,
+  pattern_filter,
+  _deps,
+} = {}) {
+  const requested = Math.max(3, Math.min(Number(last_n_bars) || 100, MAX_PATTERN_BARS));
+  const minStrength = Math.max(0, Math.min(Number(min_strength) || 0, 1));
+
+  const ohlcv = await getOhlcv({ count: requested, summary: false, _deps });
+  const bars = ohlcv?.bars || [];
+  if (bars.length === 0) {
+    return { success: true, bar_count: 0, hits: [], known_patterns: KNOWN_PATTERNS };
+  }
+
+  const hits = detectPatternsInBars(bars, {
+    minStrength,
+    patternFilter: pattern_filter || null,
+  });
+  hits.sort((a, b) => b.time - a.time);
+
+  return {
+    success: true,
+    bar_count: bars.length,
+    period: { from: bars[0].time, to: bars[bars.length - 1].time },
+    min_strength: minStrength,
+    hit_count: hits.length,
+    hits,
+    known_patterns: KNOWN_PATTERNS,
+  };
 }
