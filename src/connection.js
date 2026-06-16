@@ -372,7 +372,27 @@ export async function evaluate(expression, opts = {}) {
 
 export async function evaluateAsync(expression) {
   if (_testOverrides?.evaluateAsync) return _testOverrides.evaluateAsync(expression);
-  return evaluate(expression, { awaitPromise: true });
+  
+  const token = `__evaluateAsyncPromise_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
+  const wrappedExpression = `
+    (function() {
+      try {
+        window.${token} = Promise.resolve().then(async () => {
+          return ${expression}
+          ;
+        });
+        window.${token}.finally(function() {
+          setTimeout(function() {
+            try { delete window.${token}; } catch(e) {}
+          }, 1000);
+        });
+        return window.${token};
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    })()
+  `;
+  return evaluate(wrappedExpression, { awaitPromise: true });
 }
 
 /**
