@@ -16,6 +16,8 @@ function require_fs() { return { writeFileSync, unlinkSync }; }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = join(__dirname, '..', 'src', 'cli', 'index.js');
+const networkIt = process.env.SKIP_NETWORK_TESTS === '1' ? it.skip : it;
+const networkDescribe = process.env.SKIP_NETWORK_TESTS === '1' ? describe.skip : describe;
 
 function run(args, opts = {}) {
   try {
@@ -115,7 +117,7 @@ describe('CLI — help and routing', () => {
   // a real add (no TV), but the error we expect is from a deeper layer —
   // either "CDP connection failed" (no TV running in CI) or a JS evaluation
   // error — proving the name made it through parseArgs.
-  it('indicator add with leading-hyphen name passes through parser', () => {
+  networkIt('indicator add with leading-hyphen name passes through parser', () => {
     const { stderr, exitCode } = run(['indicator', 'add', '-4 CB Model Indicator']);
     // exitCode 2 = CDP connection failure (no TV in CI); exitCode 1 with
     // JS-evaluation error also acceptable. Critically, it MUST NOT be
@@ -177,7 +179,7 @@ describe('CLI — pine analyze (offline)', () => {
   });
 });
 
-describe('CLI — pine check (server compile)', () => {
+networkDescribe('CLI — pine check (server compile)', () => {
   it('compiles valid Pine Script', () => {
     const source = '//@version=6\nindicator("test")\nplot(close)';
     const { stdout, exitCode } = run(['pine', 'check'], { input: source });
