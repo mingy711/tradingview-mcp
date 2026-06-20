@@ -34,7 +34,7 @@ describe('core/chart.js — setSymbol verification (post-call retry)', () => {
           waitForStudiesReady: async () => true,
           dismissBlockingDialogs: async () => { dismissedCalls++; return [{ note: 'leave_replay', button: 'Leave' }]; },
           getClient: async () => ({ Page: { reload: async () => { reloadCalls++; } } }),
-          disconnect: async () => {},
+          disconnect: async () => { },
         },
       }),
       (err) => {
@@ -83,7 +83,7 @@ describe('core/chart.js — setSymbol verification (post-call retry)', () => {
         getClient: async () => ({
           Page: { reload: async () => { reloadCalls++; reloaded = true; } },
         }),
-        disconnect: async () => {},
+        disconnect: async () => { },
       },
     });
     assert.equal(r.success, true);
@@ -116,8 +116,8 @@ describe('core/chart.js — setSymbol verification (post-call retry)', () => {
           waitForChartReady: async () => true,
           waitForStudiesReady: async () => true,
           dismissBlockingDialogs: async () => [],
-          getClient: async () => ({ Page: { reload: async () => {} } }),
-          disconnect: async () => {},
+          getClient: async () => ({ Page: { reload: async () => { } } }),
+          disconnect: async () => { },
         },
       }),
       (err) => {
@@ -164,7 +164,7 @@ describe('core/chart.js — setSymbol verification (post-call retry)', () => {
         waitForStudiesReady: async () => true,
         dismissBlockingDialogs: async () => [],
         getClient: async () => ({ Page: { reload: async () => { reloaded = true; } } }),
-        disconnect: async () => {},
+        disconnect: async () => { },
       },
     });
     assert.equal(r.success, true);
@@ -203,7 +203,7 @@ describe('core/chart.js — setSymbol verification (post-call retry)', () => {
         getClient: async () => ({
           Page: { reload: async () => { reloadCalls++; reloaded = true; } },
         }),
-        disconnect: async () => {},
+        disconnect: async () => { },
       },
     });
     assert.equal(r.success, true);
@@ -270,6 +270,58 @@ describe('core/chart.js — setSymbol verification (post-call retry)', () => {
     assert.equal(r.symbol, 'NASDAQ:AAPL');
     assert.deepEqual(r.dismissed_dialogs, [{ note: 'leave_replay', button: 'Leave' }]);
     assert.equal(dismissedCalls, 1);
+  });
+
+  it('test_setSymbol_recovers_through_visible_symbol_search_before_reload', async () => {
+    let actual = 'BATS:VRT';
+    let insertedText = null;
+    const keys = [];
+    let reloadCalls = 0;
+    installCdpMocks({
+      evaluate: async (expr) => {
+        if (typeof expr === 'string' && /getAllStudies/.test(expr)) return [];
+        if (typeof expr === 'string' && /\.symbol\(\)/.test(expr) && !expr.includes('setSymbol')) {
+          return actual;
+        }
+        if (typeof expr === 'string' && /symbol_button_not_found/.test(expr)) {
+          return { opened: true };
+        }
+        if (typeof expr === 'string' && /HTMLInputElement/.test(expr)) {
+          return true;
+        }
+        return null;
+      },
+      evaluateAsync: async () => undefined,
+    });
+
+    const r = await chart.setSymbol({
+      symbol: 'SNDK',
+      _deps: {
+        waitForChartReady: async () => true,
+        waitForStudiesReady: async () => true,
+        dismissBlockingDialogs: async () => [],
+        getClient: async () => ({
+          Input: {
+            insertText: async ({ text }) => { insertedText = text; },
+            dispatchKeyEvent: async ({ type, key }) => {
+              if (type === 'keyDown') keys.push(key);
+              if (type === 'keyDown' && key === 'Enter') actual = 'NASDAQ:SNDK';
+            },
+          },
+          Page: { reload: async () => { reloadCalls++; } },
+        }),
+        disconnect: async () => { },
+      },
+    });
+
+    assert.equal(r.success, true);
+    assert.equal(r.symbol, 'NASDAQ:SNDK');
+    assert.equal(r.requested, 'SNDK');
+    assert.equal(r.ui_fallback, true);
+    assert.equal(r.hard_reloaded, undefined);
+    assert.equal(insertedText, 'SNDK');
+    assert.deepEqual(keys, ['ArrowDown', 'Enter']);
+    assert.equal(reloadCalls, 0, 'UI recovery avoids destructive hard reload');
   });
 });
 
@@ -536,9 +588,11 @@ describe('core/chart.js — smoke', () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = async () => ({
       ok: true,
-      json: async () => ({ symbols: [
-        { symbol: '<em>AAPL</em>', description: 'Apple', exchange: 'NASDAQ', type: 'stock' },
-      ]}),
+      json: async () => ({
+        symbols: [
+          { symbol: '<em>AAPL</em>', description: 'Apple', exchange: 'NASDAQ', type: 'stock' },
+        ]
+      }),
     });
     try {
       const r = await chart.symbolSearch({ query: 'AAPL' });

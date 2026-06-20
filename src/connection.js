@@ -111,7 +111,7 @@ export async function getClient() {
       // If the timeout wins the race, this probe is abandoned; a later
       // client.close() rejects all pending callbacks, which would surface as
       // an unhandledRejection (and can kill the process). Swallow it.
-      livenessProbe.catch(() => {});
+      livenessProbe.catch(() => { });
       await Promise.race([
         livenessProbe,
         new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('liveness timeout')), 2000); }),
@@ -120,7 +120,7 @@ export async function getClient() {
       return client;
     } catch {
       clearTimeout(timer);
-      try { await client.close(); } catch {}
+      try { await client.close(); } catch { }
       client = null;
       targetInfo = null;
     }
@@ -154,7 +154,7 @@ export async function withReconnect(operation, maxRetries = 3) {
       lastError = err;
       const msg = err?.message || String(err);
       if (!RECONNECT_ERR_RE.test(msg)) throw err;
-      try { if (client) await client.close(); } catch {}
+      try { if (client) await client.close(); } catch { }
       client = null;
       targetInfo = null;
       const delay = Math.min(BASE_DELAY * Math.pow(2, attempt), 5000);
@@ -214,7 +214,7 @@ async function _doConnect() {
       // 'hidden' which pauses requestAnimationFrame — capture_screenshot
       // returns a blank canvas (HTML overlays render, candles do not).
       // Per-target setting; must re-apply on every (re)attach.
-      try { await client.Emulation.setFocusEmulationEnabled({ enabled: true }); } catch {}
+      try { await client.Emulation.setFocusEmulationEnabled({ enabled: true }); } catch { }
 
       return client;
     } catch (err) {
@@ -259,7 +259,7 @@ function targetMatchesFilter(target, filter) {
 export function setPin(targetId) {
   pinnedTargetId = targetId;
   // Drop the cached client so the next call rebinds to the new pin.
-  if (client) { try { client.close(); } catch {} client = null; targetInfo = null; }
+  if (client) { try { client.close(); } catch { } client = null; targetInfo = null; }
 }
 export function clearPin() { setPin(null); }
 export function getPin() { return pinnedTargetId; }
@@ -278,7 +278,7 @@ export async function claimAndPin(targetId, { force = false, lane = null } = {})
   setPin(targetId);
   // Release any prior pin we held — moving to a new tab.
   if (prev && prev !== targetId) {
-    try { await _registryRelease(prev); } catch {}
+    try { await _registryRelease(prev); } catch { }
   }
   return result;
 }
@@ -372,7 +372,7 @@ export async function evaluate(expression, opts = {}) {
 
 export async function evaluateAsync(expression) {
   if (_testOverrides?.evaluateAsync) return _testOverrides.evaluateAsync(expression);
-  
+
   const token = `__evaluateAsyncPromise_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
   const wrappedExpression = `
     (function() {
@@ -487,7 +487,7 @@ export async function connectToTarget(targetId) {
       // No domain enables — see connect() for the EPIPE-on-TV-close rationale.
       client.on('disconnect', () => { client = null; targetInfo = null; });
       // Re-apply per-target focus emulation. See connect() for rationale.
-      try { await client.Emulation.setFocusEmulationEnabled({ enabled: true }); } catch {}
+      try { await client.Emulation.setFocusEmulationEnabled({ enabled: true }); } catch { }
       targetInfo = { id: targetId };
       return client;
     } catch (err) {

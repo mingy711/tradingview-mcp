@@ -154,6 +154,92 @@ export async function setSymbol({ symbol, discard_unsaved = false, _deps }) {
     return actual;
   }
 
+  // Recovery path through TradingView's visible symbol-search UI. Some TV
+  // builds leave chart.setSymbol() permanently inert while the toolbar search
+  // still works normally. Drive the same sequence a user would:
+  // click the current-symbol button, focus/clear the search input, type the
+  // requested symbol, then select the first matching result with ArrowDown +
+  // Enter. The caller still verifies chart.symbol() afterward, so a stale or
+  // wrong search result cannot be reported as success.
+  async function _tryUiSymbolSearch(currentSymbol) {
+    const opened = await evaluate(`
+      (function() {
+        function visible(el) {
+          if (!el) return false;
+          var r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0 && el.offsetParent !== null;
+        }
+        var button =
+          document.querySelector('[data-name="header-toolbar-symbol-search"]') ||
+          document.querySelector('[aria-label="Symbol Search"]') ||
+          document.querySelector('[aria-label="Symbol search"]');
+        if (!visible(button)) {
+          var bare = ${safeString(String(currentSymbol || '').split(':').pop())}.toUpperCase();
+          var candidates = document.querySelectorAll('button, [role="button"]');
+          for (var i = 0; i < candidates.length; i++) {
+            var candidate = candidates[i];
+            var rect = candidate.getBoundingClientRect();
+            var text = (candidate.textContent || '').trim().toUpperCase();
+            if (visible(candidate) && rect.top < 80 && text === bare) {
+              button = candidate;
+              break;
+            }
+          }
+        }
+        if (!visible(button)) return { opened: false, reason: 'symbol_button_not_found' };
+        button.click();
+        return { opened: true };
+      })()
+    `);
+    if (!opened?.opened) return opened || { opened: false, reason: 'symbol_button_not_found' };
+
+    let inputReady = false;
+    for (let i = 0; i < 20; i++) {
+      inputReady = await evaluate(`
+        (function() {
+          var inputs = document.querySelectorAll(
+            '[role="dialog"] input, [data-name*="symbol-search"] input, input[placeholder*="Search" i]'
+          );
+          for (var i = 0; i < inputs.length; i++) {
+            var input = inputs[i];
+            var r = input.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0 || input.offsetParent === null) continue;
+            input.focus();
+            var setter = Object.getOwnPropertyDescriptor(
+              window.HTMLInputElement.prototype, 'value'
+            ).set;
+            setter.call(input, '');
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            return true;
+          }
+          return false;
+        })()
+      `);
+      if (inputReady) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (!inputReady) return { opened: true, typed: false, reason: 'search_input_not_found' };
+
+    const c = await getClient();
+    if (!c?.Input?.insertText || !c?.Input?.dispatchKeyEvent) {
+      return { opened: true, typed: false, reason: 'cdp_input_unavailable' };
+    }
+    await c.Input.insertText({ text: String(symbol) });
+    await new Promise(r => setTimeout(r, 700));
+
+    async function press(key, code, vk) {
+      await c.Input.dispatchKeyEvent({
+        type: 'keyDown', key, code, windowsVirtualKeyCode: vk,
+      });
+      await c.Input.dispatchKeyEvent({
+        type: 'keyUp', key, code, windowsVirtualKeyCode: vk,
+      });
+    }
+    await press('ArrowDown', 'ArrowDown', 40);
+    await press('Enter', 'Enter', 13);
+    return { opened: true, typed: true, selected: true };
+  }
+
   // Detect the "This symbol doesn't exist" / "No data here" overlay that
   // TV draws when the chart's data fetch failed but the JS API still
   // reports the requested symbol — chart.symbol() matches, yet the user
@@ -220,6 +306,7 @@ export async function setSymbol({ symbol, discard_unsaved = false, _deps }) {
   await _doSetSymbol();
   let { actual, overlay: errorOverlay } = await _checkHealthy(8000);
   let dismissedDialogs = [];
+  let uiFallback;
   let hardReloaded = false;
 
   // If the JS API didn't reflect the change, TV likely popped a blocking
@@ -229,7 +316,7 @@ export async function setSymbol({ symbol, discard_unsaved = false, _deps }) {
   // skips this step because dismissing a dialog won't refetch the chart
   // data; hard reload is the only recovery for that case.)
   if (!_symbolMatches(symbol, actual)) {
-    try { dismissedDialogs = await dismissBlockingDialogs({ evaluate, discardUnsaved: !!discard_unsaved }); } catch {}
+    try { dismissedDialogs = await dismissBlockingDialogs({ evaluate, discardUnsaved: !!discard_unsaved }); } catch { }
     // Refuse rather than silently discard unsaved Pine/drawing changes. The
     // dialog was detected but not clicked (blocked) because discard_unsaved
     // wasn't set — mirror layout_switch's opt-in-to-lose-work contract.
@@ -246,6 +333,21 @@ export async function setSymbol({ symbol, discard_unsaved = false, _deps }) {
     }
     await _doSetSymbol();
     ({ actual, overlay: errorOverlay } = await _checkHealthy(8000));
+  }
+
+  // If the internal API stayed inert, try the visible toolbar search before
+  // resorting to Page.reload. This is both less destructive (preserves
+  // studies/drawings/replay state) and works on TV builds where setSymbol()
+  // silently no-ops but manual symbol search remains responsive.
+  if (!_symbolMatches(symbol, actual) && !errorOverlay) {
+    try {
+      uiFallback = await _tryUiSymbolSearch(actual);
+      if (uiFallback?.selected) {
+        ({ actual, overlay: errorOverlay } = await _checkHealthy(6000));
+      }
+    } catch (uiErr) {
+      uiFallback = { attempted: true, error: uiErr.message };
+    }
   }
 
   // Last-resort: hard reload. Triggers on either (a) JS API still wrong,
@@ -348,6 +450,8 @@ export async function setSymbol({ symbol, discard_unsaved = false, _deps }) {
     chart_ready: ready,
     studies_ready,
     dismissed_dialogs: dismissedDialogs.length ? dismissedDialogs : undefined,
+    ui_fallback: uiFallback?.selected ? true : undefined,
+    ui_fallback_details: uiFallback,
     hard_reloaded: hardReloaded || undefined,
     prior_studies: hardReloaded ? priorStudies : undefined,
     inert_studies: inertStudies,
@@ -386,7 +490,7 @@ export async function setTimeframe({ timeframe, _deps }) {
     // unsaved Pine/drawing edits (this tool has no discard opt-in). The
     // "Leave replay" dialog is still dismissed; an unsaved-changes dialog is
     // left in place and reported as blocked.
-    try { dismissedDialogs = await dismissBlockingDialogs({ evaluate, discardUnsaved: false }); } catch {}
+    try { dismissedDialogs = await dismissBlockingDialogs({ evaluate, discardUnsaved: false }); } catch { }
     blockedUnsaved = dismissedDialogs.some(d => d.blocked);
     if (!blockedUnsaved) {
       await evaluate(setResJs);
@@ -632,7 +736,7 @@ async function _extendCacheBackward(evaluate, fromUnixSec) {
     if (replayLeftRunning) {
       // One retry — TV occasionally drops the first stopReplay during
       // the immediate post-selectDate window.
-      try { await evaluate(`window.TradingViewApi._replayApi.stopReplay()`); } catch {}
+      try { await evaluate(`window.TradingViewApi._replayApi.stopReplay()`); } catch { }
       await new Promise(r => setTimeout(r, 600));
       try {
         replayLeftRunning = await evaluate(`
@@ -642,7 +746,7 @@ async function _extendCacheBackward(evaluate, fromUnixSec) {
             return (st && typeof st.value === 'function') ? st.value() : !!st;
           })()
         `);
-      } catch {}
+      } catch { }
     }
     return {
       extended: !!started,

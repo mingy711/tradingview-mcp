@@ -18,7 +18,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           UPSTREAM: tradesdontlie/tradingview-mcp
-          FORK: iliaal/tradingview-mcp
+          FORK: ${{ github.repository }}
         run: |
           # Get open PRs on upstream
           PRS=$(gh pr list --repo "$UPSTREAM" --state open --json number,title,createdAt,url \
@@ -48,7 +48,7 @@ jobs:
         id: existing
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FORK: iliaal/tradingview-mcp
+          FORK: ${{ github.repository }}
         run: |
           TODAY=$(date +%Y-%m-%d)
           EXISTING=$(gh issue list --repo "$FORK" --label "upstream-tracker" --state open \
@@ -59,7 +59,7 @@ jobs:
         if: steps.existing.outputs.exists == '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FORK: iliaal/tradingview-mcp
+          FORK: ${{ github.repository }}
         run: |
           gh label create upstream-tracker \
             --repo "$FORK" \
@@ -72,7 +72,7 @@ jobs:
         id: create
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FORK: iliaal/tradingview-mcp
+          FORK: ${{ github.repository }}
           UPSTREAM: tradesdontlie/tradingview-mcp
         run: |
           TODAY=$(date +%Y-%m-%d)
@@ -128,7 +128,7 @@ jobs:
         if: steps.existing.outputs.exists == '0' && steps.create.outputs.issue_number != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FORK: iliaal/tradingview-mcp
+          FORK: ${{ github.repository }}
           NEW_NUMBER: ${{ steps.create.outputs.issue_number }}
         run: |
           # Match by title prefix so we also catch legacy unlabeled trackers.
