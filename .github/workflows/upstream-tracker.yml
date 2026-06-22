@@ -44,7 +44,17 @@ jobs:
           # Save PR list for issue body
           echo "$PRS" > /tmp/prs.json
 
+      - name: Check whether Issues are enabled
+        id: issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORK: ${{ github.repository }}
+        run: |
+          ENABLED=$(gh api "repos/$FORK" --jq '.has_issues')
+          echo "enabled=$ENABLED" >> "$GITHUB_OUTPUT"
+
       - name: Check if issue already exists for today
+        if: steps.issues.outputs.enabled == 'true'
         id: existing
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -53,10 +63,10 @@ jobs:
           TODAY=$(date +%Y-%m-%d)
           EXISTING=$(gh issue list --repo "$FORK" --label "upstream-tracker" --state open \
             --json title --jq "[.[] | select(.title | contains(\"$TODAY\"))] | length")
-          echo "exists=$EXISTING" >> $GITHUB_OUTPUT
+          echo "exists=$EXISTING" >> "$GITHUB_OUTPUT"
 
       - name: Ensure upstream-tracker label exists
-        if: steps.existing.outputs.exists == '0'
+        if: steps.issues.outputs.enabled == 'true' && steps.existing.outputs.exists == '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORK: ${{ github.repository }}
@@ -68,7 +78,7 @@ jobs:
             2>/dev/null || true
 
       - name: Create tracking issue
-        if: steps.existing.outputs.exists == '0'
+        if: steps.issues.outputs.enabled == 'true' && steps.existing.outputs.exists == '0'
         id: create
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -125,7 +135,7 @@ jobs:
           echo "issue_number=$NEW_NUMBER" >> $GITHUB_OUTPUT
 
       - name: Close prior tracker issues
-        if: steps.existing.outputs.exists == '0' && steps.create.outputs.issue_number != ''
+        if: steps.issues.outputs.enabled == 'true' && steps.existing.outputs.exists == '0' && steps.create.outputs.issue_number != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORK: ${{ github.repository }}
@@ -139,3 +149,16 @@ jobs:
             gh issue close "$n" --repo "$FORK" --reason "not planned" \
               --comment "Superseded by #$NEW_NUMBER (next daily upstream-tracker snapshot)."
           done
+
+      - name: Report when Issues are disabled
+        if: steps.issues.outputs.enabled != 'true'
+        env:
+          FORK: ${{ github.repository }}
+        run: |
+          {
+            echo "## Upstream Tracker"
+            echo
+            echo "Issue creation was skipped because GitHub Issues are disabled for \`$FORK\`."
+            echo
+            echo "Enable Issues in **Settings → General → Features** to publish daily tracker issues."
+          } >> "$GITHUB_STEP_SUMMARY"
