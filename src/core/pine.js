@@ -4,6 +4,7 @@
  * They throw on error (callers catch and format).
  */
 import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, evaluateChecked as _evaluateChecked, getClient as _getClient } from '../connection.js';
+import { dismissBlockingDialogs } from './dialog.js';
 
 function _resolve(deps) {
   return {
@@ -226,6 +227,12 @@ const MONACO_PINE_EDITOR_AVAILABLE = `
     }
   })()
 `;
+
+// Authoritative "which saved script is the editor bound to" element. Its text
+// (an inner <h2> on newer builds) is the current script's title. Shared by
+// getSource, listScripts, and switchScript so the binding signal is read the
+// same way everywhere.
+const TITLE_BTN_EXPR = `(document.querySelector('[data-qa-id="pine-script-title-button"]') || document.querySelector('[class*="nameButton"]'))`;
 
 /**
  * Opens the Pine Editor panel and waits for Monaco to become available.
@@ -461,7 +468,28 @@ export async function getSource({ _deps } = {}) {
     throw new Error('Monaco editor found but getValue() returned null.');
   }
 
-  return { success: true, source, line_count: source.split('\n').length, char_count: source.length };
+  // Read the title button — the authoritative "which saved script is this
+  // editor bound to" signal (same element switchScript verifies against).
+  // Callers use `current_script` to confirm the editor is bound to the
+  // intended script BEFORE writing, so a set_source/save can't land on the
+  // wrong slot. It is the editor binding, not the buffer's indicator() name.
+  const { evaluate } = _resolve(_deps);
+  const currentScript = await evaluate(`
+    (function() {
+      var btn = ${TITLE_BTN_EXPR};
+      if (!btn) return null;
+      var h = btn.querySelector('h2');
+      return ((h || btn).textContent || '').trim() || null;
+    })()
+  `);
+
+  return {
+    success: true,
+    source,
+    line_count: source.split('\n').length,
+    char_count: source.length,
+    current_script: currentScript,
+  };
 }
 
 export async function setSource({ source, _deps }) {
@@ -1015,7 +1043,7 @@ export async function openScript({ name, id, _deps }) {
 }
 
 export async function listScripts({ _deps } = {}) {
-  const { evaluateAsync } = _resolve(_deps);
+  const { evaluate, evaluateAsync } = _resolve(_deps);
   const scripts = await evaluateAsync(`
     fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved', { credentials: 'include' })
       .then(function(r) { return r.json(); })
@@ -1036,11 +1064,40 @@ export async function listScripts({ _deps } = {}) {
       .catch(function(e) { return {scripts: [], error: e.message}; })
   `);
 
+  const list = scripts?.scripts || [];
+  const count = list.length;
+
+  // The pine-facade list endpoint intermittently returns an empty array on
+  // transient/auth hiccups — indistinguishable from a genuinely empty account.
+  // That false "no scripts" reading is dangerous: callers have used it to
+  // decide a script doesn't exist and then CREATE one (overwriting a sibling).
+  // Cross-check against the editor's bound script: if the list is empty but a
+  // script is clearly open in the editor, the list is unreliable, NOT empty.
+  // Never treat reliable:false as "no scripts exist".
+  let reliable = true;
+  let warning;
+  if (count === 0 && !scripts?.error) {
+    const boundScript = await evaluate(`
+      (function() {
+        var btn = ${TITLE_BTN_EXPR};
+        if (!btn) return null;
+        var h = btn.querySelector('h2');
+        return ((h || btn).textContent || '').trim() || null;
+      })()
+    `).catch(() => null);
+    if (boundScript) {
+      reliable = false;
+      warning = `pine-facade returned 0 saved scripts, but the editor is bound to "${boundScript}" — the list is unreliable (transient/auth), NOT empty. Do not treat this as "no scripts exist" or create a new script.`;
+    }
+  }
+
   return {
     success: true,
-    scripts: scripts?.scripts || [],
-    count: scripts?.scripts?.length || 0,
+    scripts: list,
+    count,
     source: 'internal_api',
+    reliable,
+    ...(warning ? { warning } : {}),
     error: scripts?.error,
   };
 }
@@ -1070,11 +1127,11 @@ export async function listScripts({ _deps } = {}) {
  *   7. Verify the title button now shows the requested name.
  */
 export async function switchScript({ name, _deps }) {
-  const { evaluate, evaluateAsync } = _resolve(_deps);
+  const { evaluate, getClient } = _resolve(_deps);
   const editorReady = await ensurePineEditorOpen({ _deps });
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
-  const TITLE_BTN = `(document.querySelector('[data-qa-id="pine-script-title-button"]') || document.querySelector('[class*="nameButton"]'))`;
+  const TITLE_BTN = TITLE_BTN_EXPR;
 
   const currentBefore = await evaluate(`
     (function() {
@@ -1086,51 +1143,75 @@ export async function switchScript({ name, _deps }) {
     return { success: true, requested: name, current: name, shortCircuited: true };
   }
 
-  // Clear any open menus (title button may have been clicked earlier).
-  await evaluate(`(function() {
-    document.dispatchEvent(new KeyboardEvent('keydown', { key:'Escape', code:'Escape', keyCode:27, which:27, bubbles:true }));
-    document.dispatchEvent(new KeyboardEvent('keydown', { key:'Escape', code:'Escape', keyCode:27, which:27, bubbles:true }));
-  })()`);
-  await new Promise(r => setTimeout(r, 200));
+  // Open the script picker. A blocking modal (e.g. an unsaved-changes prompt)
+  // or a lost editor focus can swallow the shortcut so the dialog never mounts
+  // — the exact failure that used to abort the switch and push callers onto an
+  // unsafe fallback. Dismiss blocking dialogs, (re)focus the editor, fire the
+  // trusted Cmd/Ctrl+O shortcut, and poll; retry once (with the other
+  // modifier) if the picker doesn't appear.
+  let dialogReady = false;
+  for (let attempt = 0; attempt < 2 && !dialogReady; attempt++) {
+    // Non-destructive: clears menus/overlays but leaves an unsaved-changes
+    // dialog blocked rather than discarding the user's draft.
+    await dismissBlockingDialogs({ evaluate, discardUnsaved: false }).catch(() => {});
 
-  // Focus the Pine editor textarea so Ctrl+O is captured by Monaco /
-  // TV's script-editor keybinding, not by some other panel.
-  await evaluate(`(function() {
-    var c = document.querySelector('.pine-editor-monaco') || document.querySelector('[class*="pine-editor"]');
-    var ta = c && c.querySelector('textarea');
-    if (ta) ta.focus();
-  })()`);
-  await new Promise(r => setTimeout(r, 100));
+    // Activate + focus the Pine editor so the trusted Cmd/Ctrl+O below is
+    // captured by TV's script-editor keybinding. ensurePineEditorOpen alone
+    // does NOT give the editor input focus, and TV 3.2.0's Monaco has no bare
+    // <textarea> (the focus target is `.inputarea`), so the previous
+    // `querySelector('textarea').focus()` was a silent no-op — focus stayed
+    // elsewhere and the shortcut was ignored. That was the real cause of
+    // "picker did not appear". activateScriptEditorTab() is idempotent (safe
+    // when the panel is already open — it won't toggle it closed); if focus is
+    // still not on an input we click the editor element to place the caret.
+    await evaluate(`(function() {
+      try {
+        var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
+        if (bwb && typeof bwb.activateScriptEditorTab === 'function') bwb.activateScriptEditorTab();
+      } catch (e) {}
+      var el = document.querySelector('.monaco-editor.pine-editor-monaco')
+        || document.querySelector('.pine-editor-monaco')
+        || document.querySelector('[class*="pine-editor"]');
+      if (el) {
+        var ia = el.querySelector('textarea, .inputarea');
+        if (ia) ia.focus(); else el.click();
+      }
+    })()`);
+    await new Promise(r => setTimeout(r, 200));
 
-  // Ctrl+O — the shortcut shown on the "Open script…" menu item.
-  await evaluate(`(function() {
-    var t = document.activeElement || document.body;
-    function ev(type) {
-      return new KeyboardEvent(type, {
-        key: 'o', code: 'KeyO', keyCode: 79, which: 79,
-        ctrlKey: true, bubbles: true, cancelable: true,
-      });
+    // Fire the "Open script…" shortcut as a TRUSTED key event via the CDP
+    // Input domain. A synthetic DOM KeyboardEvent (isTrusted:false) is ignored
+    // by TV/Electron's keybinding service, so the picker never mounts — that
+    // was the real cause of "picker did not appear". The shortcut is Cmd+O on
+    // macOS and Ctrl+O elsewhere; try meta first, Ctrl on the retry so one
+    // build of switchScript covers both platforms.
+    // Fetch a FRESH client immediately before dispatching — do NOT cache it
+    // across the earlier evaluate()/ensurePineEditorOpen()/dismiss() calls. A
+    // cached client can be silently replaced by connection.js's liveness/
+    // reconnect path, leaving a stale reference whose Input events never reach
+    // the live page (evaluate() would still work via the new client, so the
+    // poll below sees "no dialog"). ui_keyboard dispatches this same way.
+    const mod = attempt === 0 ? 4 /* meta (⌘) */ : 2 /* ctrl */;
+    const cdp = await getClient();
+    await cdp.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: mod, key: 'o', code: 'KeyO', windowsVirtualKeyCode: 79 });
+    await cdp.Input.dispatchKeyEvent({ type: 'keyUp', modifiers: mod, key: 'o', code: 'KeyO', windowsVirtualKeyCode: 79 });
+
+    // Poll for the picker dialog to mount with a CLIENT-side loop of plain
+    // evaluate() checks. Do NOT use a page-side evaluateAsync setInterval
+    // Promise here: while the "Open script" modal is mounting it can fail to
+    // resolve/observe the element and returns false even though the picker is
+    // actually open — the real reason switchScript reported "did not appear"
+    // after successfully opening the dialog. A client-driven poll (same
+    // pattern as the title-button poll below) reads the live DOM reliably.
+    for (let i = 0; i < 40; i++) {
+      if (await evaluate(`!!document.querySelector('[data-name="open-user-script-dialog"]')`)) {
+        dialogReady = true;
+        break;
+      }
+      await new Promise(r => setTimeout(r, 50));
     }
-    t.dispatchEvent(ev('keydown'));
-    t.dispatchEvent(ev('keypress'));
-    t.dispatchEvent(ev('keyup'));
-  })()`);
-
-  // Poll for the picker dialog to mount. Must use evaluateAsync so the
-  // Promise actually resolves on the page side before returning.
-  const dialogReady = await evaluateAsync(`
-    new Promise(function(resolve) {
-      var elapsed = 0;
-      var iv = setInterval(function() {
-        if (document.querySelector('[data-name="open-user-script-dialog"]')) {
-          clearInterval(iv); resolve(true);
-        }
-        elapsed += 50;
-        if (elapsed >= 2000) { clearInterval(iv); resolve(false); }
-      }, 50);
-    })
-  `);
-  if (!dialogReady) throw new Error('Open-script picker dialog did not appear after Ctrl+O.');
+  }
+  if (!dialogReady) throw new Error('Open-script picker dialog did not appear after Ctrl+O (retried once, dismissed blocking dialogs).');
 
   // Type the name into the search box. React inputs ignore plain
   // `input.value = x` — use the native setter then dispatch 'input'.
