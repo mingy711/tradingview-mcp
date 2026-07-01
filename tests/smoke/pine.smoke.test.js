@@ -365,23 +365,29 @@ describe('core/pine.js — smoke', () => {
     );
   });
 
-  // ── B.17 switchScript (Ctrl+O picker path) ────────────────────────
-  // Call sequence:
+  // ── B.17 switchScript (Cmd/Ctrl+O picker path) ────────────────────
+  // getClient() is resolved first (mock with fakeCdpClient) — the Cmd/Ctrl+O
+  // shortcut is dispatched as a TRUSTED cdp.Input.dispatchKeyEvent, so it does
+  // NOT consume an evaluate() index.
+  // evaluate() call sequence:
   //  1. ensurePineEditorOpen → PINE_EDITOR_DIALOG_PRESENT
   //  2. ensurePineEditorOpen → MONACO_PINE_EDITOR_AVAILABLE
   //  3. currentBefore (title button text)
   //  --- if short-circuit, return here ---
-  //  4. dispatch Escape×2 (clear menus, returns undefined)
-  //  5. focus textarea (returns undefined)
-  //  6. Ctrl+O keydown/press/up (returns undefined)
-  //  7. poll for picker dialog → true/false
-  //  8. set search input value (returns undefined)
-  //  9. find + click matching row → { ok: true, matched_via: 'exact_title'|'prefix' } or { error }
-  // 10..N. poll for title-button text to match (early-exit when match)
+  //  --- picker-open retry loop (up to 2 attempts), per attempt: ---
+  //  4. dismissBlockingDialogs (returns array/undefined; result unused)
+  //  5. activate + focus the Pine editor (returns undefined)
+  //     [Cmd/Ctrl+O via cdp.Input.dispatchKeyEvent — not an evaluate() call]
+  //  6. poll for picker dialog → true/false (loop exits when true)
+  //  --- after picker is open: ---
+  //  7. set search input value (returns undefined)
+  //  8. find + click matching row → { ok: true, matched_via: 'exact_title'|'prefix' } or { error }
+  //  9..N. poll for title-button text to match (early-exit when match)
   //  N+1. close dialog (returns undefined)
   it('test_switchScript_smoke_short_circuits_when_already_active', async () => {
     let evalIdx = 0;
     installCdpMocks({
+      getClient: async () => fakeCdpClient(),
       evaluate: async () => {
         evalIdx++;
         if (evalIdx === 1) return true;       // PINE_EDITOR_DIALOG_PRESENT
@@ -398,16 +404,16 @@ describe('core/pine.js — smoke', () => {
   it('test_switchScript_smoke_throws_when_picker_does_not_open', async () => {
     let evalIdx = 0;
     installCdpMocks({
+      getClient: async () => fakeCdpClient(),
       evaluate: async () => {
         evalIdx++;
         if (evalIdx === 1) return true;          // PINE_EDITOR_DIALOG_PRESENT
         if (evalIdx === 2) return true;          // MONACO_PINE_EDITOR_AVAILABLE
         if (evalIdx === 3) return 'Different';   // currentBefore (not target)
-        if (evalIdx === 4) return undefined;     // Escape clear
-        if (evalIdx === 5) return undefined;     // focus textarea
-        if (evalIdx === 6) return undefined;     // Ctrl+O dispatch
-        if (evalIdx === 7) return false;         // poll for dialog → timeout
-        return undefined;
+        // attempt 0: dismiss(4), activate+focus(5), [Cmd+O via cdp], poll(6)
+        if (evalIdx === 6) return false;         // poll for dialog → timeout
+        // attempt 1: dismiss(7), activate+focus(8), [Ctrl+O via cdp], poll(9)
+        return undefined;                        // all other polls → falsy → throw
       },
     });
     await assert.rejects(
@@ -419,18 +425,18 @@ describe('core/pine.js — smoke', () => {
   it('test_switchScript_smoke_completes_via_react_onclick', async () => {
     let evalIdx = 0;
     installCdpMocks({
+      getClient: async () => fakeCdpClient(),
       evaluate: async () => {
         evalIdx++;
         if (evalIdx === 1) return true;          // PINE_EDITOR_DIALOG_PRESENT
         if (evalIdx === 2) return true;          // MONACO_PINE_EDITOR_AVAILABLE
         if (evalIdx === 3) return 'Different';   // currentBefore
-        if (evalIdx === 4) return undefined;     // Escape clear
-        if (evalIdx === 5) return undefined;     // focus textarea
-        if (evalIdx === 6) return undefined;     // Ctrl+O dispatch
-        if (evalIdx === 7) return true;          // picker dialog appears
-        if (evalIdx === 8) return undefined;     // set search input
-        if (evalIdx === 9) return { ok: true, matched_via: 'exact_title' };  // React onClick
-        if (evalIdx === 10) return 'My Strategy'; // title-button after click (matches on first poll)
+        if (evalIdx === 4) return undefined;     // dismissBlockingDialogs
+        if (evalIdx === 5) return undefined;     // activate + focus editor ([Cmd+O via cdp])
+        if (evalIdx === 6) return true;          // picker dialog appears
+        if (evalIdx === 7) return undefined;     // set search input
+        if (evalIdx === 8) return { ok: true, matched_via: 'exact_title' };  // React onClick
+        if (evalIdx === 9) return 'My Strategy'; // title-button after click (matches on first poll)
         return undefined;                         // dialog close
       },
     });
@@ -443,17 +449,17 @@ describe('core/pine.js — smoke', () => {
   it('test_switchScript_smoke_throws_when_script_not_in_picker', async () => {
     let evalIdx = 0;
     installCdpMocks({
+      getClient: async () => fakeCdpClient(),
       evaluate: async () => {
         evalIdx++;
         if (evalIdx === 1) return true;          // PINE_EDITOR_DIALOG_PRESENT
         if (evalIdx === 2) return true;          // MONACO_PINE_EDITOR_AVAILABLE
         if (evalIdx === 3) return 'Different';   // currentBefore
-        if (evalIdx === 4) return undefined;     // Escape clear
-        if (evalIdx === 5) return undefined;     // focus textarea
-        if (evalIdx === 6) return undefined;     // Ctrl+O dispatch
-        if (evalIdx === 7) return true;          // picker dialog appears
-        if (evalIdx === 8) return undefined;     // set search input
-        if (evalIdx === 9) return { error: 'no_match', searched: 'Missing', results: ['Foo', 'Bar'] };
+        if (evalIdx === 4) return undefined;     // dismissBlockingDialogs
+        if (evalIdx === 5) return undefined;     // activate + focus editor ([Cmd+O via cdp])
+        if (evalIdx === 6) return true;          // picker dialog appears
+        if (evalIdx === 7) return undefined;     // set search input
+        if (evalIdx === 8) return { error: 'no_match', searched: 'Missing', results: ['Foo', 'Bar'] };
         return undefined;                         // dialog close
       },
     });

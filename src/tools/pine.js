@@ -4,7 +4,7 @@ import { jsonResult } from './_format.js';
 import * as core from '../core/pine.js';
 
 export function registerPineTools(server) {
-  server.tool('pine_get_source', 'Get current Pine Script source code from the editor', {}, async () => {
+  server.tool('pine_get_source', 'Get current Pine Script source code from the editor. Also returns `current_script`: the name of the saved script the editor is BOUND to (its title button) — use this to confirm the editor is on the intended script before pine_set_source / pine_smart_compile, so a write/save cannot land on the wrong slot.', {}, async () => {
     try { return jsonResult(await core.getSource()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
@@ -55,7 +55,7 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, source: 'internal_api', error: err.message }, true); }
   });
 
-  server.tool('pine_list_scripts', 'List saved Pine Scripts', {}, async () => {
+  server.tool('pine_list_scripts', 'List saved Pine Scripts. Returns `reliable` (bool): when false, the underlying list endpoint returned empty but a script is clearly open in the editor — the result is a transient/auth hiccup, NOT a genuinely empty account. NEVER treat count:0 (especially reliable:false) as "no scripts exist" or as a signal to create a new script.', {}, async () => {
     try { return jsonResult(await core.listScripts()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
