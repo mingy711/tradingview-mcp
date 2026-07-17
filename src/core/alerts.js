@@ -260,9 +260,10 @@ export async function createForWatchlist({ watchlistName, study, alertCondition,
 
   const addAlertRow = await evaluate(`
     (function() {
-      var menu = document.querySelector('.menuBox-XktvVkFF');
-      if (!menu) return { error: 'Watchlist dropdown menu not found' };
-      var rows = menu.querySelectorAll('[role="row"]');
+      // Scan the whole document, not the hashed menu-container class
+      // (.menuBox-XktvVkFF), which drifts and matches nothing — see
+      // openWatchlistMenu. The distinctive item text below disambiguates.
+      var rows = document.querySelectorAll('[role="row"]');
       for (var i = 0; i < rows.length; i++) {
         var text = rows[i].textContent.trim().replace(/\\u2026/g, '...');
         if (/^Add alert on the list/i.test(text)) {
