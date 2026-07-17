@@ -103,9 +103,10 @@ export async function switchToWatchlist(watchlistName, { _deps } = {}) {
     (function() {
       var btn = document.querySelector('[data-name="watchlists-button"]');
       if (btn && btn.textContent.trim() === ${safeString(watchlistName)}) return { active: true };
-      var menu = document.querySelector('.menuBox-XktvVkFF');
-      if (!menu) return { error: 'Watchlist dropdown menu not found' };
-      var rows = menu.querySelectorAll('[role="row"]');
+      // Scan the whole document, not the hashed menu-container class
+      // (.menuBox-XktvVkFF), which drifts and matches nothing — see
+      // openWatchlistMenu. The distinctive menu-item text below disambiguates.
+      var rows = document.querySelectorAll('[role="row"]');
       for (var i = 0; i < rows.length; i++) {
         if (rows[i].textContent.trim() === ${safeString(watchlistName)}) {
           rows[i].click();
@@ -654,9 +655,10 @@ export async function delete_({ watchlistName, _deps } = {}) {
 
   const openListClicked = await evaluate(`
     (function() {
-      var menu = document.querySelector('.menuBox-XktvVkFF');
-      if (!menu) return { error: 'Watchlist dropdown menu not found' };
-      var rows = menu.querySelectorAll('[role="row"]');
+      // Scan the whole document, not the hashed menu-container class
+      // (.menuBox-XktvVkFF), which drifts and matches nothing — see
+      // openWatchlistMenu. The distinctive menu-item text below disambiguates.
+      var rows = document.querySelectorAll('[role="row"]');
       for (var i = 0; i < rows.length; i++) {
         if (rows[i].textContent.trim().indexOf('Open list') === 0) {
           rows[i].click();
@@ -724,9 +726,10 @@ export async function getShareLink({ watchlistName, _deps } = {}) {
 
   const shareState = await evaluate(`
     (function() {
-      var menu = document.querySelector('.menuBox-XktvVkFF');
-      if (!menu) return { error: 'Watchlist dropdown menu not found' };
-      var rows = menu.querySelectorAll('[role="row"]');
+      // Scan the whole document, not the hashed menu-container class
+      // (.menuBox-XktvVkFF), which drifts and matches nothing — see
+      // openWatchlistMenu. The distinctive menu-item text below disambiguates.
+      var rows = document.querySelectorAll('[role="row"]');
       for (var i = 0; i < rows.length; i++) {
         if (rows[i].textContent.trim() === 'Share list') {
           var r = rows[i].getBoundingClientRect();
@@ -748,9 +751,10 @@ export async function getShareLink({ watchlistName, _deps } = {}) {
 
   const copyRow = await evaluate(`
     (function() {
-      var menu = document.querySelector('.menuBox-XktvVkFF');
-      if (!menu) return { error: 'Watchlist dropdown menu not found' };
-      var rows = menu.querySelectorAll('[role="row"]');
+      // Scan the whole document, not the hashed menu-container class
+      // (.menuBox-XktvVkFF), which drifts and matches nothing — see
+      // openWatchlistMenu. The distinctive menu-item text below disambiguates.
+      var rows = document.querySelectorAll('[role="row"]');
       for (var i = 0; i < rows.length; i++) {
         if (rows[i].textContent.trim().replace(/\\u2026/g, '...') === 'Copy link...') {
           var r = rows[i].getBoundingClientRect();
