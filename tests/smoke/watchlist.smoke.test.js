@@ -91,6 +91,40 @@ describe('core/watchlist.js — smoke', () => {
     assert.deepEqual(r.skipped, ['TSLA']);
   });
 
+  // ── openWatchlistMenu (dropdown open via real pointer click) ────────
+  it('test_openWatchlistMenu_opens_via_pointer_click', async () => {
+    // A programmatic btn.click() does not open TradingView's React dropdown;
+    // openWatchlistMenu must dispatch a real CDP pointer click and verify the
+    // menu rendered. Calls: 1=button rect, 2=menuVisible(false), 3=menuVisible(true).
+    const client = fakeCdpClient();
+    let call = 0;
+    installCdpMocks({
+      getClient: async () => client,
+      evaluate: async () => {
+        call++;
+        if (call === 1) return { x: 1049, y: 66 };  // button center
+        if (call === 2) return { open: false };      // not open yet
+        return { open: true };                       // opened after the click
+      },
+    });
+    const r = await watchlist.openWatchlistMenu();
+    assert.equal(r.opened, true);
+    // Proof it used a real pointer click, not element.click().
+    assert.ok(client.log.some(e => e.type === 'mousePressed' && e.button === 'left'),
+      'expected a left mouse-button dispatch');
+  });
+
+  it('test_openWatchlistMenu_throws_when_button_missing', async () => {
+    installCdpMocks({
+      getClient: async () => fakeCdpClient(),
+      evaluate: async () => ({ error: 'Watchlist menu button not found' }),
+    });
+    await assert.rejects(
+      watchlist.openWatchlistMenu(),
+      /Watchlist menu button not found/,
+    );
+  });
+
   // ── B.15 addBulk ───────────────────────────────────────────────────
   it('test_addBulk_smoke_throws_when_add_button_missing', async () => {
     // addBulk: ensures panel open (no-op if missing button), then clicks

@@ -48,19 +48,48 @@ export async function ensureWatchlistPanelOpen({ _deps } = {}) {
  * Open the Watchlist dropdown menu at the top of the watchlist panel.
  */
 export async function openWatchlistMenu({ _deps } = {}) {
-  const { evaluate } = _resolve(_deps);
-  const menuOpened = await evaluate(`
+  const { evaluate, getClient } = _resolve(_deps);
+  const c = await getClient();
+
+  // Locate the dropdown button's center. A programmatic btn.click() does NOT
+  // reliably open TradingView's React dropdown — only a real CDP pointer click
+  // (dispatchClick) does — so we click by coordinate below.
+  const rect = await evaluate(`
     (function() {
       var btn = document.querySelector('[data-name="watchlists-button"]');
       if (!btn) return { error: 'Watchlist menu button not found' };
-      btn.click();
-      return { opened: true };
+      var r = btn.getBoundingClientRect();
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
     })()
   `);
+  if (rect?.error) throw new Error(rect.error);
 
-  if (menuOpened?.error) throw new Error(menuOpened.error);
-  await new Promise(r => setTimeout(r, 300));
-  return menuOpened;
+  // Detect the open dropdown by its stable action items ("Upload list…",
+  // "Create new list…", "Open list…") rather than TradingView's rotating
+  // hashed menu-container class (e.g. .menuBox-XktvVkFF), which drifts.
+  const menuVisible = async () => {
+    const res = await evaluate(`
+      (function() {
+        var nodes = document.querySelectorAll('[role="row"], [role="menuitem"], button, div, span');
+        for (var i = 0; i < nodes.length; i++) {
+          var t = (nodes[i].textContent || '').trim().replace(/\\u2026/g, '...');
+          if (/^(Upload list|Create new list|Open list)\\.\\.\\.$/i.test(t)) return { open: true };
+        }
+        return { open: false };
+      })()
+    `);
+    return !!res?.open;
+  };
+
+  // The dropdown is a toggle: re-check before every click so an already-open
+  // menu is never clicked shut. Retry a few times for a slow render.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (await menuVisible()) return { opened: true };
+    await dispatchClick(c, rect.x, rect.y);
+    await new Promise(r => setTimeout(r, 350));
+  }
+  if (await menuVisible()) return { opened: true };
+  return { opened: false, warning: 'watchlist dropdown did not render after 3 attempts' };
 }
 
 /**
@@ -74,9 +103,10 @@ export async function switchToWatchlist(watchlistName, { _deps } = {}) {
     (function() {
       var btn = document.querySelector('[data-name="watchlists-button"]');
       if (btn && btn.textContent.trim() === ${safeString(watchlistName)}) return { active: true };
-      var menu = document.querySelector('.menuBox-XktvVkFF');
-      if (!menu) return { error: 'Watchlist dropdown menu not found' };
-      var rows = menu.querySelectorAll('[role="row"]');
+      // Scan the whole document, not the hashed menu-container class
+      // (.menuBox-XktvVkFF), which drifts and matches nothing — see
+      // openWatchlistMenu. The distinctive menu-item text below disambiguates.
+      var rows = document.querySelectorAll('[role="row"]');
       for (var i = 0; i < rows.length; i++) {
         if (rows[i].textContent.trim() === ${safeString(watchlistName)}) {
           rows[i].click();
@@ -557,19 +587,27 @@ export async function upload({ filePath, _deps } = {}) {
   try {
     await openWatchlistMenu({ _deps });
 
+    // Scan the whole document for the "Upload list…" item rather than scoping
+    // to the hashed menu-container class (.menuBox-XktvVkFF), which drifts and
+    // now matches nothing — the same reason openWatchlistMenu was rewritten.
+    // Prefer the deepest (smallest) matching node so we click the real leaf
+    // menu item, not an oversized wrapper div that also contains the text.
     const importRow = await evaluate(`
       (function() {
-        var menu = document.querySelector('.menuBox-XktvVkFF')
-          || document.querySelector('[role="menu"]')
-          || document.body;
-        var rows = menu.querySelectorAll('[role="row"], [role="menuitem"], button, div');
-        for (var i = 0; i < rows.length; i++) {
-          var text = (rows[i].textContent || '').trim().replace(/\\u2026/g, '...');
+        var nodes = document.querySelectorAll('[role="row"], [role="menuitem"], button, div, span');
+        var best = null;
+        for (var i = 0; i < nodes.length; i++) {
+          var text = (nodes[i].textContent || '').trim().replace(/\\u2026/g, '...');
           if (/^(Import|Upload)( list| watchlist)?(\\.\\.\\.)?$/i.test(text)) {
-            var r = rows[i].getBoundingClientRect();
-            return { found: true, text: text, x: r.x + r.width / 2, y: r.y + r.height / 2 };
+            var r = nodes[i].getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) continue;
+            var area = r.width * r.height;
+            if (!best || area < best.area) {
+              best = { found: true, text: text, x: r.x + r.width / 2, y: r.y + r.height / 2, area: area };
+            }
           }
         }
+        if (best) return best;
         return { error: 'Upload/Import list menu item not found' };
       })()
     `);
@@ -617,9 +655,10 @@ export async function delete_({ watchlistName, _deps } = {}) {
 
   const openListClicked = await evaluate(`
     (function() {
-      var menu = document.querySelector('.menuBox-XktvVkFF');
-      if (!menu) return { error: 'Watchlist dropdown menu not found' };
-      var rows = menu.querySelectorAll('[role="row"]');
+      // Scan the whole document, not the hashed menu-container class
+      // (.menuBox-XktvVkFF), which drifts and matches nothing — see
+      // openWatchlistMenu. The distinctive menu-item text below disambiguates.
+      var rows = document.querySelectorAll('[role="row"]');
       for (var i = 0; i < rows.length; i++) {
         if (rows[i].textContent.trim().indexOf('Open list') === 0) {
           rows[i].click();
@@ -687,9 +726,10 @@ export async function getShareLink({ watchlistName, _deps } = {}) {
 
   const shareState = await evaluate(`
     (function() {
-      var menu = document.querySelector('.menuBox-XktvVkFF');
-      if (!menu) return { error: 'Watchlist dropdown menu not found' };
-      var rows = menu.querySelectorAll('[role="row"]');
+      // Scan the whole document, not the hashed menu-container class
+      // (.menuBox-XktvVkFF), which drifts and matches nothing — see
+      // openWatchlistMenu. The distinctive menu-item text below disambiguates.
+      var rows = document.querySelectorAll('[role="row"]');
       for (var i = 0; i < rows.length; i++) {
         if (rows[i].textContent.trim() === 'Share list') {
           var r = rows[i].getBoundingClientRect();
@@ -711,9 +751,10 @@ export async function getShareLink({ watchlistName, _deps } = {}) {
 
   const copyRow = await evaluate(`
     (function() {
-      var menu = document.querySelector('.menuBox-XktvVkFF');
-      if (!menu) return { error: 'Watchlist dropdown menu not found' };
-      var rows = menu.querySelectorAll('[role="row"]');
+      // Scan the whole document, not the hashed menu-container class
+      // (.menuBox-XktvVkFF), which drifts and matches nothing — see
+      // openWatchlistMenu. The distinctive menu-item text below disambiguates.
+      var rows = document.querySelectorAll('[role="row"]');
       for (var i = 0; i < rows.length; i++) {
         if (rows[i].textContent.trim().replace(/\\u2026/g, '...') === 'Copy link...') {
           var r = rows[i].getBoundingClientRect();
