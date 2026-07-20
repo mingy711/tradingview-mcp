@@ -258,24 +258,36 @@ export async function createForWatchlist({ watchlistName, study, alertCondition,
   await openWatchlistMenu({ _deps });
   await switchToWatchlist(watchlistName, { _deps });
 
+  // Scan the whole document, not the hashed menu-container class
+  // (.menuBox-XktvVkFF), which drifts and matches nothing — see
+  // openWatchlistMenu. "Add alert on the list…" is a top action item, NOT a
+  // [role="row"] (only the switchable watchlist NAMES are rows), so scope the
+  // scan the same broad way uploadList/openWatchlistMenu do. Pick the deepest
+  // (smallest) matching node so we click the real leaf item, not an oversized
+  // wrapper div, then fire a real CDP pointer click — a programmatic .click()
+  // does NOT reliably activate TradingView's React menu items.
   const addAlertRow = await evaluate(`
     (function() {
-      // Scan the whole document, not the hashed menu-container class
-      // (.menuBox-XktvVkFF), which drifts and matches nothing — see
-      // openWatchlistMenu. The distinctive item text below disambiguates.
-      var rows = document.querySelectorAll('[role="row"]');
-      for (var i = 0; i < rows.length; i++) {
-        var text = rows[i].textContent.trim().replace(/\\u2026/g, '...');
-        if (/^Add alert on the list/i.test(text)) {
-          rows[i].click();
-          return { found: true };
+      var nodes = document.querySelectorAll('[role="row"], [role="menuitem"], button, div, span');
+      var best = null;
+      for (var i = 0; i < nodes.length; i++) {
+        var text = (nodes[i].textContent || '').trim().replace(/\\u2026/g, '...');
+        if (/^Add alert on the list(\\.\\.\\.)?$/i.test(text)) {
+          var r = nodes[i].getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) continue;
+          var area = r.width * r.height;
+          if (!best || area < best.area) {
+            best = { found: true, x: r.x + r.width / 2, y: r.y + r.height / 2, area: area };
+          }
         }
       }
+      if (best) return best;
       return { error: '"Add alert on the list..." menu item not found' };
     })()
   `);
 
   if (addAlertRow?.error) throw new Error(addAlertRow.error);
+  await dispatchClick(c, addAlertRow.x, addAlertRow.y);
   await new Promise(r => setTimeout(r, 700));
 
   if (study) {
